@@ -33,8 +33,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Создать google_credentials.json из секрета
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > google_credentials.json
+          printf '%s' "$GOOGLE_CREDS" > google_credentials.json
 
       - name: Запустить мониторинг
         env:
