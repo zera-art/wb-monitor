@@ -1,0 +1,21 @@
+# Секреты — НИКОГДА не загружать в репозиторий
+.env
+google_credentials.json
+
+# Кэш и логи — генерируются при запуске
+last_run_cache.json
+wb_monitor.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code
+.claude/

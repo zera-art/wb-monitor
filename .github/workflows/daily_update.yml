@@ -1,0 +1,64 @@
+name: WB Monitor — Ежедневное обновление
+
+on:
+  schedule:
+    # Каждый день в 07:00 UTC (10:00 МСК)
+    - cron: '0 7 * * *'
+
+  # Возможность запустить вручную
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (не писать в Sheets)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  update_dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Создать google_credentials.json из секрета
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > google_credentials.json
+
+      - name: Запустить мониторинг
+        env:
+          WB_KEY_STATS:      ${{ secrets.WB_KEY_STATS }}
+          WB_KEY_CONTENT:    ${{ secrets.WB_KEY_CONTENT }}
+          WB_KEY_PRICES:     ${{ secrets.WB_KEY_PRICES }}
+          WB_KEY_ANALYTICS:  ${{ secrets.WB_KEY_ANALYTICS }}
+          WB_KEY_ADS:        ${{ secrets.WB_KEY_ADS }}
+          SPREADSHEET_ID:    ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_CREDENTIALS_PATH: google_credentials.json
+          TELEGRAM_ENABLED:  ${{ secrets.TELEGRAM_ENABLED }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
+
+      - name: Сохранить лог как артефакт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb-monitor-log-${{ github.run_id }}
+          path: wb_monitor.log
+          retention-days: 30
