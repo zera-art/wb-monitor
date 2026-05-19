@@ -90,6 +90,11 @@ class SheetsWriter:
         "📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ",
         "📊 ЭФФЕКТИВНОСТЬ",
         "🚚 ПОСТАВКИ",
+        "🚚 ПОСТАВКИ Коледино",
+        "🚚 ПОСТАВКИ Шушары",
+        "🚚 ПОСТАВКИ Казань",
+        "🚚 ПОСТАВКИ Краснодар",
+        "🚚 ПОСТАВКИ Екатеринбург",
     ]
 
     # Column indices in ОЧЕРЕДЬ ИЗМЕНЕНИЙ (0-based)
@@ -1003,11 +1008,28 @@ class SheetsWriter:
 
     # ── Лист ПОСТАВКИ ────────────────────────────────────────────────────────
 
+    # Сводный лист — все кластеры
     _SUPPLY_HEADERS = [
-        "Артикул", "Баркод", "Название", "Категория", "ABC",
+        "Приоритет", "Артикул", "Баркод", "Название", "Категория", "ABC",
         "Кластер", "Склад WB", "Остаток", "Продажи/день",
-        "Потребность 28д", "Рекомендовать (шт)", "Дней до нуля", "Приоритет",
+        "Потребность 28д", "Рекомендовать (шт)", "Дней до нуля",
     ]
+
+    # Листы по складам — без Кластер/Склад WB (они вынесены в заголовок)
+    _SUPPLY_WH_HEADERS = [
+        "Приоритет", "Артикул", "Баркод", "Название", "Категория", "ABC",
+        "Остаток на складе", "Продажи/день", "Потребность 28д",
+        "Рекомендовать (шт)", "Дней до нуля",
+    ]
+
+    # Целевой склад → кластер
+    _SUPPLY_WAREHOUSES: dict[str, str] = {
+        "Коледино":     "Центр",
+        "Шушары":       "СПБ",
+        "Казань":       "Казань",
+        "Краснодар":    "Юг",
+        "Екатеринбург": "Урал и Сибирь",
+    }
 
     SUPPLY_PRIORITY_COLORS = {
         "🔴": "#ffcdd2",
@@ -1016,7 +1038,14 @@ class SheetsWriter:
     }
 
     def update_supply_sheet(self, recommendations: list[dict]):
-        """Записывает рекомендации к поставке на лист 🚚 ПОСТАВКИ."""
+        """Обновляет сводный лист ПОСТАВКИ и отдельный лист для каждого склада."""
+        self._update_supply_summary(recommendations)
+        for warehouse, cluster in self._SUPPLY_WAREHOUSES.items():
+            wh_recs = [r for r in recommendations if r.get("warehouse") == warehouse]
+            self._update_supply_warehouse_sheet(warehouse, cluster, wh_recs)
+
+    def _update_supply_summary(self, recommendations: list[dict]):
+        """Сводный лист 🚚 ПОСТАВКИ — все SKU по всем складам."""
         ws = self._get_sheet("🚚 ПОСТАВКИ")
         ws.clear()
         sheet_id = ws.id
@@ -1024,12 +1053,10 @@ class SheetsWriter:
         today_str = datetime.now().strftime("%d.%m.%Y %H:%M")
         title = f"🚚 РЕКОМЕНДАЦИИ К ПОСТАВКЕ — обновлено {today_str}"
 
-        # Сводка по кластерам и приоритетам
         clusters_count: dict[str, int] = {}
         prio_count = {"🔴": 0, "🟡": 0, "🟢": 0}
         for r in recommendations:
-            cl = r.get("cluster", "")
-            clusters_count[cl] = clusters_count.get(cl, 0) + 1
+            clusters_count[r.get("cluster", "")] = clusters_count.get(r.get("cluster", ""), 0) + 1
             for emoji in prio_count:
                 if r.get("priority", "").startswith(emoji):
                     prio_count[emoji] += 1
@@ -1040,25 +1067,18 @@ class SheetsWriter:
                    f"🟡 Плановая: {prio_count['🟡']} | "
                    f"🟢 Запас: {prio_count['🟢']}")
 
+        ncols = len(self._SUPPLY_HEADERS)
         rows = [[title], [summary], [clusters_str], [""], self._SUPPLY_HEADERS]
         fmt_reqs = [
-            self._cell_req(sheet_id, 0, 1, 0, len(self._SUPPLY_HEADERS), {
-                "textFormat": {"bold": True, "fontSize": 12},
-            }),
-            self._cell_req(sheet_id, 1, 3, 0, len(self._SUPPLY_HEADERS), {
-                "textFormat": {"bold": True, "fontSize": 10},
-            }),
-            self._header_req(sheet_id, 4, len(self._SUPPLY_HEADERS)),
+            self._cell_req(sheet_id, 0, 1, 0, ncols, {"textFormat": {"bold": True, "fontSize": 12}}),
+            self._cell_req(sheet_id, 1, 3, 0, ncols, {"textFormat": {"bold": True, "fontSize": 10}}),
+            self._header_req(sheet_id, 4, ncols),
         ]
 
         ri = 5
-        for r in sorted(recommendations,
-                         key=lambda x: (
-                             0 if x.get("priority", "").startswith("🔴") else
-                             1 if x.get("priority", "").startswith("🟡") else 2,
-                             -x.get("needed_28d", 0)
-                         )):
+        for r in self._sorted_recs(recommendations):
             rows.append([
+                r.get("priority", ""),
                 r.get("vendor_code", r.get("nm_id", "")),
                 r.get("barcode", ""),
                 r.get("name", "")[:40],
@@ -1071,25 +1091,85 @@ class SheetsWriter:
                 r.get("needed_28d", 0),
                 r.get("recommended_qty", 0),
                 round(r.get("days_to_zero", 0), 1),
-                r.get("priority", ""),
             ])
-            prio = r.get("priority", "")
-            for emoji, color in self.SUPPLY_PRIORITY_COLORS.items():
-                if prio.startswith(emoji):
-                    fmt_reqs.append(self._cell_req(
-                        sheet_id, ri, ri + 1, 0, len(self._SUPPLY_HEADERS),
-                        {"backgroundColor": _hex(color)},
-                    ))
-                    break
+            fmt_reqs.extend(self._prio_row_reqs(sheet_id, ri, ncols, r.get("priority", "")))
             ri += 1
 
         self._write(ws, rows)
         time.sleep(1)
-        self._batch([
-            self._freeze_req(sheet_id, 5),
-            self._resize_req(sheet_id, len(self._SUPPLY_HEADERS)),
-        ] + fmt_reqs)
-        logger.info(f"Лист ПОСТАВКИ: {len(recommendations)} SKU")
+        self._batch([self._freeze_req(sheet_id, 5), self._resize_req(sheet_id, ncols)] + fmt_reqs)
+        logger.info(f"Лист ПОСТАВКИ (сводный): {len(recommendations)} SKU")
+
+    def _update_supply_warehouse_sheet(self, warehouse: str, cluster: str, recs: list[dict]):
+        """Лист поставки для конкретного склада."""
+        sheet_name = f"🚚 ПОСТАВКИ {warehouse}"
+        ws = self._get_sheet(sheet_name)
+        ws.clear()
+        sheet_id = ws.id
+
+        today_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        prio_count = {"🔴": 0, "🟡": 0, "🟢": 0}
+        abc_count  = {"A": 0, "B": 0}
+        for r in recs:
+            for emoji in prio_count:
+                if r.get("priority", "").startswith(emoji):
+                    prio_count[emoji] += 1
+            abc = r.get("abc", "")
+            if abc in abc_count:
+                abc_count[abc] += 1
+
+        ncols = len(self._SUPPLY_WH_HEADERS)
+        rows = [
+            [f"📦 ПОСТАВКИ НА СКЛАД {warehouse} — обновлено {today_str}"],
+            [f"Кластер: {cluster} | Горизонт: 28 дней | Сезонность учтена"],
+            [f"Итого SKU: {len(recs)} | 🔴 Срочно: {prio_count['🔴']} | "
+             f"🟡 Плановая: {prio_count['🟡']} | 🟢 Запас: {prio_count['🟢']}"],
+            [f"Категория A: {abc_count['A']} SKU | Категория B: {abc_count['B']} SKU"],
+            [""],
+            self._SUPPLY_WH_HEADERS,
+        ]
+        fmt_reqs = [
+            self._cell_req(sheet_id, 0, 1, 0, ncols, {"textFormat": {"bold": True, "fontSize": 12}}),
+            self._cell_req(sheet_id, 1, 4, 0, ncols, {"textFormat": {"bold": True, "fontSize": 10}}),
+            self._header_req(sheet_id, 5, ncols),
+        ]
+
+        ri = 6
+        for r in self._sorted_recs(recs):
+            rows.append([
+                r.get("priority", ""),
+                r.get("vendor_code", r.get("nm_id", "")),
+                r.get("barcode", ""),
+                r.get("name", "")[:40],
+                r.get("category", ""),
+                r.get("abc", ""),
+                r.get("stock", 0),
+                round(r.get("sales_per_day", 0), 2),
+                r.get("needed_28d", 0),
+                r.get("recommended_qty", 0),
+                round(r.get("days_to_zero", 0), 1),
+            ])
+            fmt_reqs.extend(self._prio_row_reqs(sheet_id, ri, ncols, r.get("priority", "")))
+            ri += 1
+
+        self._write(ws, rows)
+        time.sleep(1)
+        self._batch([self._freeze_req(sheet_id, 6), self._resize_req(sheet_id, ncols)] + fmt_reqs)
+        logger.info(f"Лист {sheet_name}: {len(recs)} SKU")
+
+    @staticmethod
+    def _sorted_recs(recs: list[dict]) -> list[dict]:
+        return sorted(recs, key=lambda x: (
+            0 if x.get("priority", "").startswith("🔴") else
+            1 if x.get("priority", "").startswith("🟡") else 2,
+            -x.get("needed_28d", 0),
+        ))
+
+    def _prio_row_reqs(self, sheet_id: int, ri: int, ncols: int, priority: str) -> list[dict]:
+        for emoji, color in self.SUPPLY_PRIORITY_COLORS.items():
+            if priority.startswith(emoji):
+                return [self._cell_req(sheet_id, ri, ri + 1, 0, ncols, {"backgroundColor": _hex(color)})]
+        return []
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
