@@ -11,12 +11,20 @@ logger = logging.getLogger(__name__)
 
 # ── Кластеры складов ──────────────────────────────────────────────────────────
 
+# Первый склад в списке — основной для поставки (указывается в рекомендации)
 CLUSTERS: dict[str, list[str]] = {
-    "Центр": ["Коледино", "Электросталь", "Подольск"],
-    "СПБ":   ["Шушары"],
-    "Казань":["Казань"],
-    "Юг":    ["Краснодар", "Ростов"],
-    "Урал":  ["Екатеринбург"],
+    "Центр":         ["Коледино", "Электросталь", "Подольск"],
+    "СПБ":           ["Шушары"],
+    "Казань":        ["Казань"],
+    "Юг":            ["Краснодар", "Ростов"],
+    "Урал и Сибирь": ["Екатеринбург", "Новосибирск"],
+}
+
+# Для части кластеров спрос считается по федеральным округам,
+# а не по складу отгрузки. Это позволяет учитывать заказы в регион
+# даже если WB отгружал их с другого склада.
+CLUSTER_REGIONS: dict[str, list[str]] = {
+    "Урал и Сибирь": ["Уральский", "Дальневосточный", "Сибирский"],
 }
 
 # Обратная карта: подстрока склада → кластер
@@ -24,6 +32,12 @@ _WAREHOUSE_TO_CLUSTER: dict[str, str] = {}
 for _cluster, _warehouses in CLUSTERS.items():
     for _wh in _warehouses:
         _WAREHOUSE_TO_CLUSTER[_wh.lower()] = _cluster
+
+# Обратная карта: подстрока округа → кластер
+_REGION_TO_CLUSTER: dict[str, str] = {}
+for _cluster, _regions in CLUSTER_REGIONS.items():
+    for _region in _regions:
+        _REGION_TO_CLUSTER[_region.lower()] = _cluster
 
 EXCLUDED_CATEGORIES = {"Комплексные пищевые добавки"}
 SUPPLY_HORIZON_DAYS = 28
@@ -37,6 +51,19 @@ def _warehouse_cluster(warehouse_name: str) -> str | None:
         if key in wl:
             return cluster
     return None
+
+
+def _demand_cluster(warehouse_name: str, oblast_okrug: str = "") -> str | None:
+    """
+    Определяет кластер для подсчёта спроса (продаж).
+    Для кластеров из CLUSTER_REGIONS приоритет — федеральный округ заказа.
+    Для остальных — название склада отгрузки.
+    """
+    okrug_l = oblast_okrug.lower()
+    for key, cluster in _REGION_TO_CLUSTER.items():
+        if key in okrug_l:
+            return cluster
+    return _warehouse_cluster(warehouse_name)
 
 
 # ── Получение данных из WB API ────────────────────────────────────────────────
@@ -235,7 +262,7 @@ def calc_supply_recommendation(orders: list[dict],
     for row in sales_history:
         nm_id = row.get("nmId")
         wh    = row.get("warehouseName", "")
-        cluster = _warehouse_cluster(wh)
+        cluster = _demand_cluster(wh, row.get("oblastOkrugName", ""))
         if nm_id and cluster:
             sales_by_cluster[nm_id][cluster] += row.get("quantity", 1)
 
