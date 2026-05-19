@@ -202,7 +202,7 @@ class SKUMetrics:
             new_price_cell = result["new_price"] if result else ""
         elif "ЦЕНА ПОДНЯТА" in self.status:
             new_price_cell = f"✓ {self.final_price:.0f}"
-        elif "МЁРТВЫЙ" in self.status or "ЗАМЕДЛЕННАЯ" in self.status:
+        elif "МЁРТВЫЙ" in self.status or "ЗАМЕДЛЕННАЯ" in self.status or "КРИТИЧНЫЙ" in self.status:
             has_no_sales = self.sales_7d < 0.5 and self.sales_prev_7d < 0.5
             dec = calc_price_decrease(self.turnover_days, self.final_price, self.category,
                                       has_no_sales_14d=has_no_sales)
@@ -252,56 +252,41 @@ SHEET_HEADERS = [
 def _classify(m: SKUMetrics) -> tuple[str, str, int]:
     """
     Возвращает (статус, рекомендация, приоритет).
-    Приоритет: 1=срочно (красный), 2=важно (оранжевый), 3=мониторинг (жёлтый), 4=ОК (зелёный).
+    Приоритет: 1=срочно, 2=важно, 3=мониторинг, 4=ОК.
     """
-    t = THRESHOLDS
 
-    # 1. Мёртвый остаток: нет продаж 4+ недель, остаток > 10 шт, оборачиваемость не быстрая
-    if (m.stock > 10
-            and m.sales_28d < 1
-            and m.turnover_days >= t["normal_turnover_days"]):
-        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category, has_no_sales_14d=True)
+    # 1. Мёртвый остаток: есть товар, но нет заказов за 28 дней
+    if m.stock > 0 and m.sales_28d < 1:
+        dec = calc_price_decrease(999.0, m.final_price, m.category, has_no_sales_14d=True)
         if dec and dec["is_floor_price"]:
             price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
         elif dec:
             price_rec = f"Снизить цену до {dec['new_price']} руб (-{dec['decrease_pct']}%)"
         else:
-            price_rec = "Снизить цену до -30%"
+            price_rec = "Снизить цену на 30%"
         return (
-            "🔴 МЁРТВЫЙ ОСТАТОК",
-            f"Продаж нет 4+ недели. {price_rec}. "
-            "Проверить карточку, фото, SEO.",
+            "⚫ МЁРТВЫЙ ОСТАТОК",
+            f"Заказов нет за 28 дней. {price_rec}. Проверить карточку, фото, SEO.",
             1
         )
 
-    # 2. Критичная оборачиваемость
-    if m.turnover_days > t["critical_turnover_days"]:
-        discount_hint = (
-            f"Текущая скидка {m.discount:.0f}% — увеличить до {min(m.discount + 15, 50):.0f}%."
-            if m.discount < 40 else
-            "Скидка уже высокая. Подключить внешний трафик или акцию WB."
-        )
+    # 2. Критичный остаток: оборачиваемость > 90 дней
+    if m.turnover_days > 90:
+        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category)
+        if dec and dec["is_floor_price"]:
+            price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
+        elif dec:
+            price_rec = f"Снизить цену до {dec['new_price']} руб (-{dec['decrease_pct']}%)"
+        else:
+            price_rec = "Снизить цену"
         return (
             "🔴 КРИТИЧНЫЙ ОСТАТОК",
-            f"Оборачиваемость {m.turnover_days:.0f} дней. "
-            f"Стоимость хранения съедает маржу. {discount_hint}",
+            f"Оборачиваемость {m.turnover_days:.0f} дней. Хранение съедает маржу. {price_rec}.",
             1
         )
 
-    # 3. Замедленная оборачиваемость + распродажа не работает
-    if (m.turnover_days > t["slow_turnover_days"]
-            and m.discount > t["clearance_ineffective_discount"]
-            and m.sales_growth_pct < t["sales_growth_threshold"] * 100):
-        return (
-            "⚠️ РАСПРОДАЖА НЕЭФФЕКТИВНА",
-            "Скидка есть, но продажи не растут. "
-            "Проблема не в цене: проверить позицию в поиске, CTR карточки, отзывы. "
-            "Усилить рекламу или пересмотреть контент.",
-            1
-        )
-
-    # 4. Замедленная оборачиваемость — нужна реклама
-    if m.turnover_days > t["slow_turnover_days"]:
+    # 3. Замедленная оборачиваемость: 60–90 дней
+    if 60 < m.turnover_days <= 90:
         has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
         dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
                                   has_no_sales_14d=has_no_sales)
@@ -322,18 +307,26 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
             2
         )
 
-    # 5. Нормализация — продажи растут, оборачиваемость улучшается
-    if (m.turnover_days <= t["normal_turnover_days"]
-            and m.sales_growth_pct > t["sales_growth_threshold"] * 100):
+    # 4. Распродажа неэффективна: скидка > 20% и продажи не выросли
+    if m.discount > 20 and m.sales_growth_pct <= 10:
         return (
-            "✅ НОРМАЛИЗАЦИЯ",
-            f"Продажи растут +{m.sales_growth_pct:.0f}% к прошлой неделе. "
-            "Остаток нормализуется. Готовиться к плавному повышению цены.",
-            3
+            "⚠️ РАСПРОДАЖА НЕЭФФЕКТИВНА",
+            "Скидка есть, но продажи не растут. "
+            "Проблема не в цене: проверить позицию в поиске, CTR карточки, отзывы. "
+            "Усилить рекламу или пересмотреть контент.",
+            1
         )
 
-    # 7. Можно повышать цену
-    if m.turnover_days <= t["price_raise_turnover_days"] and m.stock > 0:
+    # 5. Нужна поставка: остаток < заказов за 7 дней
+    if m.sales_7d > 0 and m.stock < m.sales_7d:
+        return (
+            "🔵 НУЖНА ПОСТАВКА",
+            f"Остаток {m.stock} шт < продажи за 7д ({m.sales_7d:.0f} шт). Срочно пополнить запас.",
+            1
+        )
+
+    # 6. Поднять цену: оборачиваемость < 21 дня
+    if 0 < m.turnover_days < 21 and m.stock > 0:
         result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.final_price)
         if result:
             new_p = result["new_price"]
@@ -347,34 +340,22 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
                     rec = f"Поднять цену до {new_p} руб (+{pct}%). Спрос растёт — действовать уверенно"
                 else:
                     rec = f"Поднять цену до {new_p} руб (+{pct}%). Спрос замедляется — действовать осторожно"
-            elif td < 21:
-                rec = f"Поднять цену до {new_p} руб (+{pct}%)"
             else:
-                rec = f"Поднять цену до {new_p} руб (+{pct}%). Плавная коррекция"
+                rec = f"Поднять цену до {new_p} руб (+{pct}%)"
         else:
             rec = f"Оборачиваемость {m.turnover_days:.0f} дней."
         return ("🟢 ПОДНЯТЬ ЦЕНУ", rec, 3)
 
-    # 7б. Реклама даёт хороший ДРР — масштабировать
-    if (m.ad_spend_7d > 0
-            and m.ad_drr < t["ad_drr_good"] * 100
-            and m.turnover_days < t["slow_turnover_days"]):
+    # 7. Нормализация: спрос растёт > 20%
+    if m.sales_growth_pct > 20:
         return (
-            "📈 МАСШТАБИРОВАТЬ РЕКЛАМУ",
-            "Реклама окупается хорошо. "
-            "Повысить ставки или увеличить бюджет на 20–30%.",
+            "✅ НОРМАЛИЗАЦИЯ",
+            f"Продажи растут +{m.sales_growth_pct:.0f}% к прошлой неделе. "
+            "Остаток нормализуется. Готовиться к плавному повышению цены.",
             3
         )
 
-    # 9. Нет остатка
-    if m.stock == 0:
-        return (
-            "⚫ НЕТ В НАЛИЧИИ",
-            "Остаток = 0. Проверить, нужно ли пополнение.",
-            4
-        )
-
-    # 10. Норма
+    # 8. Мониторинг
     return (
         "🟡 МОНИТОРИНГ",
         f"Оборачиваемость {m.turnover_days:.0f} дней. Показатели в норме. "
