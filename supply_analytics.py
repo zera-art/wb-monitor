@@ -188,18 +188,25 @@ def apply_seasonality(wb_category: str, month: int = None) -> float:
 
 # ── Основной расчёт ───────────────────────────────────────────────────────────
 
-def calc_supply_recommendation(wb_client,
+def calc_supply_recommendation(orders: list[dict],
+                                wb_client=None,
                                 cards: list[dict] = None) -> list[dict]:
     """
     Рассчитывает рекомендации к поставке по кластерам.
+    orders — уже загруженный список заказов (orders_28d из main.py).
     Возвращает список словарей для update_supply_sheet() и supply_doc_writer.
     """
     logger.info("📦 Расчёт рекомендаций к поставке...")
 
-    # Загружаем данные
-    sales_history   = get_sales_history_90days(wb_client)
-    stock_by_wh     = get_stock_by_warehouse(wb_client)
-    barcodes        = get_barcodes(wb_client)
+    # Отменённые заказы исключаем здесь (orders_28d содержит и отменённые)
+    sales_history = [o for o in orders if not o.get("isCancel", False)]
+    lookback_days = len({o.get("date", "")[:10] for o in sales_history if o.get("date")}) or 28
+    # Нормализуем к реальному количеству уникальных дней (не менее 28)
+    lookback_days = max(lookback_days, 28)
+    logger.info(f"  → {len(sales_history)} заказов, горизонт расчёта {lookback_days} дней")
+
+    stock_by_wh     = get_stock_by_warehouse(wb_client) if wb_client else {}
+    barcodes        = get_barcodes(wb_client) if wb_client else {}
 
     # Карточки (название, категория)
     if cards is None:
@@ -266,8 +273,8 @@ def calc_supply_recommendation(wb_client,
         cluster_stock = stock_by_cluster.get(nm_id, {})
 
         for cluster in CLUSTERS:
-            total_orders_90d = cluster_sales.get(cluster, 0)
-            sales_per_day    = (total_orders_90d / 90) * seasonality
+            total_orders_28d = cluster_sales.get(cluster, 0)
+            sales_per_day    = (total_orders_28d / lookback_days) * seasonality
             current_stock    = cluster_stock.get(cluster, 0)
             target_stock     = sales_per_day * SUPPLY_HORIZON_DAYS
 

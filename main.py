@@ -334,7 +334,7 @@ def run(dry_run: bool = False):
         logger.info("🚚 Рассчитываем рекомендации к поставке...")
         supply_recs = []
         try:
-            supply_recs = calc_supply_recommendation(wb, cards=cards)
+            supply_recs = calc_supply_recommendation(orders_28d, wb_client=wb, cards=cards)
             sheets.update_supply_sheet(supply_recs)
             logger.info(f"  → Лист ПОСТАВКИ обновлён: {len(supply_recs)} SKU")
         except Exception as e:
