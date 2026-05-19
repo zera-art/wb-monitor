@@ -104,6 +104,7 @@ class SKUMetrics:
     sales_7d: float = 0.0       # продажи за 7 дней (шт)
     sales_14d: float = 0.0
     sales_28d: float = 0.0
+    sales_90d: float = 0.0      # продажи за 90 дней (шт)
     revenue_7d: float = 0.0     # выручка 7д
     revenue_28d: float = 0.0
 
@@ -211,6 +212,10 @@ class SKUMetrics:
                                   if dec["is_floor_price"] else dec["new_price"])
             else:
                 new_price_cell = ""
+        elif "НУЖНА ПОСТАВКА" in self.status or "НЕТ В НАЛИЧИИ" in self.status:
+            new_price_cell = ""
+        elif "ВЫВЕДЕН" in self.status:
+            new_price_cell = ""
         else:
             new_price_cell = ""
 
@@ -252,10 +257,47 @@ SHEET_HEADERS = [
 def _classify(m: SKUMetrics) -> tuple[str, str, int]:
     """
     Возвращает (статус, рекомендация, приоритет).
-    Приоритет: 1=срочно, 2=важно, 3=мониторинг, 4=ОК.
+    Приоритет: 1=срочно, 2=важно, 3=мониторинг, 4=ОК, 5=нет в наличии, 6=выведен.
+
+    Порядок проверки статусов:
+    0a. НЕТ В НАЛИЧИИ: stock==0 AND sales_28d==0 AND sales_90d>0  → приоритет 5
+    0b. ВЫВЕДЕН ИЗ ПРОДАЖИ: stock==0 AND sales_28d==0 AND sales_90d==0  → приоритет 6
+    1.  НУЖНА ПОСТАВКА: (stock==0 AND sales_28d>0) ИЛИ (sales_7d>0 AND stock<sales_7d)
+    2.  МЁРТВЫЙ ОСТАТОК: stock>0 AND sales_28d==0
+    3.  КРИТИЧНЫЙ ОСТАТОК: turnover_days>90
+    4.  ЗАМЕДЛЕННАЯ ОБОРАЧИВАЕМОСТЬ: 60<turnover_days<=90
+    5.  РАСПРОДАЖА НЕЭФФЕКТИВНА: discount>20 AND sales_growth_pct<=10
+    6.  ПОДНЯТЬ ЦЕНУ: 0<turnover_days<21 AND stock>0
+    7.  НОРМАЛИЗАЦИЯ: sales_growth_pct>20
+    8.  МОНИТОРИНГ: всё остальное
     """
 
-    # 1. Мёртвый остаток: есть товар, но нет заказов за 28 дней
+    # 0a. Нет в наличии: нулевой остаток, нет продаж за 28д, но были за 90д
+    if m.stock == 0 and m.sales_28d == 0 and m.sales_90d > 0:
+        return (
+            "⬜ НЕТ В НАЛИЧИИ",
+            "Остаток = 0, продаж нет 28+ дней, но были продажи в последние 90 дней. "
+            "Пополнить запас при необходимости.",
+            5
+        )
+
+    # 0b. Выведен из продажи: нулевой остаток, нет продаж ни за 28д, ни за 90д
+    if m.stock == 0 and m.sales_28d == 0 and m.sales_90d == 0:
+        return (
+            "📦 ВЫВЕДЕН ИЗ ПРОДАЖИ",
+            "Остаток = 0, продаж нет 90+ дней. Товар перенесён в АРХИВ.",
+            6
+        )
+
+    # 1. Нужна поставка: остаток = 0 при наличии заказов, или остаток < продаж за 7 дней
+    if (m.stock == 0 and m.sales_28d > 0) or (m.sales_7d > 0 and m.stock < m.sales_7d):
+        return (
+            "🔵 НУЖНА ПОСТАВКА",
+            f"Остаток {m.stock} шт < продажи за 7д ({m.sales_7d:.0f} шт). Срочно пополнить запас.",
+            1
+        )
+
+    # 2. Мёртвый остаток: есть товар, но нет заказов за 28 дней
     if m.stock > 0 and m.sales_28d < 1:
         dec = calc_price_decrease(999.0, m.final_price, m.category, has_no_sales_14d=True)
         if dec and dec["is_floor_price"]:
@@ -270,7 +312,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
             1
         )
 
-    # 2. Критичный остаток: оборачиваемость > 90 дней
+    # 3. Критичный остаток: оборачиваемость > 90 дней
     if m.turnover_days > 90:
         dec = calc_price_decrease(m.turnover_days, m.final_price, m.category)
         if dec and dec["is_floor_price"]:
@@ -285,7 +327,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
             1
         )
 
-    # 3. Замедленная оборачиваемость: 60–90 дней
+    # 4. Замедленная оборачиваемость: 60–90 дней
     if 60 < m.turnover_days <= 90:
         has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
         dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
@@ -307,21 +349,13 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
             2
         )
 
-    # 4. Распродажа неэффективна: скидка > 20% и продажи не выросли
+    # 5. Распродажа неэффективна: скидка > 20% и продажи не выросли
     if m.discount > 20 and m.sales_growth_pct <= 10:
         return (
             "⚠️ РАСПРОДАЖА НЕЭФФЕКТИВНА",
             "Скидка есть, но продажи не растут. "
             "Проблема не в цене: проверить позицию в поиске, CTR карточки, отзывы. "
             "Усилить рекламу или пересмотреть контент.",
-            1
-        )
-
-    # 5. Нужна поставка: остаток < заказов за 7 дней
-    if m.sales_7d > 0 and m.stock < m.sales_7d:
-        return (
-            "🔵 НУЖНА ПОСТАВКА",
-            f"Остаток {m.stock} шт < продажи за 7д ({m.sales_7d:.0f} шт). Срочно пополнить запас.",
             1
         )
 
@@ -459,12 +493,17 @@ def build_sku_metrics(
 def _aggregate_orders(orders: list[dict], metrics: dict):
     """Заказы из /orders → qty-метрики.
     Отменённые (isCancel=True) исключаются.
-    Разбивка по полю date (дата размещения заказа) на окна 7д / 14д / 28д.
+    Разбивка по полю date (дата размещения заказа) на окна 7д / 14д / 28д / 90д.
+    Ожидается, что orders содержит заказы за 91д (передаётся из main.py).
     """
     cutoff_7d  = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     cutoff_14d = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    cutoff_28d = (datetime.now() - timedelta(days=28)).strftime("%Y-%m-%d")
+    cutoff_90d = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
 
-    by_nm: dict[int, dict] = defaultdict(lambda: {"cur": 0, "prev": 0, "total": 0})
+    by_nm: dict[int, dict] = defaultdict(
+        lambda: {"cur": 0, "prev": 0, "total": 0, "total_90d": 0}
+    )
     for row in orders:
         if row.get("isCancel", False):
             continue
@@ -472,7 +511,10 @@ def _aggregate_orders(orders: list[dict], metrics: dict):
         if not nm_id:
             continue
         order_date = row.get("date", "")[:10]
-        by_nm[nm_id]["total"] += 1
+        if order_date >= cutoff_28d:
+            by_nm[nm_id]["total"] += 1
+        if order_date >= cutoff_90d:
+            by_nm[nm_id]["total_90d"] += 1
         if order_date >= cutoff_7d:
             by_nm[nm_id]["cur"] += 1
         elif order_date >= cutoff_14d:
@@ -483,9 +525,10 @@ def _aggregate_orders(orders: list[dict], metrics: dict):
         if not m:
             m = SKUMetrics(nm_id=nm_id)
             metrics[nm_id] = m
-        m.sales_7d    = data["cur"]
+        m.sales_7d      = data["cur"]
         m.sales_prev_7d = data["prev"]
-        m.sales_28d   = data["total"]
+        m.sales_28d     = data["total"]
+        m.sales_90d     = data["total_90d"]
 
 
 def _aggregate_sales(sales: list[dict], metrics: dict, target: str):

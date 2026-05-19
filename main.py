@@ -85,18 +85,19 @@ def run(dry_run: bool = False):
         logger.error(f"  ✗ Ошибка остатков: {e}")
         stocks = []
 
-    # ── Блок 3: Заказы 35д (qty-метрики, фильтр по date в analytics) ──
-    logger.info("📋 Загружаем заказы за 35д (qty по дате размещения)...")
+    # ── Блок 3: Заказы 91д (qty-метрики за 7/28/90д, фильтр по date в analytics) ──
+    logger.info("📋 Загружаем заказы за 91д (qty по дате размещения)...")
     try:
-        orders_raw = wb.get_orders(date_from=date_str(35))
-        # Оставляем только заказы, РАЗМЕЩЁННЫЕ в последние 28д (поле date)
+        orders_raw = wb.get_orders(date_from=date_str(91))
+        # Для логирования — заказы за последние 28д
         cutoff_28d = date_str(28)
         orders_28d = [o for o in orders_raw if o.get("date", "")[:10] >= cutoff_28d]
         active = sum(1 for o in orders_28d if not o.get("isCancel", False))
         cancelled = len(orders_28d) - active
-        logger.info(f"  → Размещено за 28д: {len(orders_28d)} | активных: {active} | отменённых: {cancelled}")
+        logger.info(f"  → Загружено всего: {len(orders_raw)} | за 28д: {len(orders_28d)} | активных: {active} | отменённых: {cancelled}")
     except WBAPIError as e:
         logger.error(f"  ✗ Ошибка заказов: {e}")
+        orders_raw = []
         orders_28d = []
 
     # ── Блок 3б: Выкупы 7д + прошлая 7д (revenue) ────────
@@ -178,7 +179,7 @@ def run(dry_run: bool = False):
     logger.info("🧮 Считаем метрики и статусы...")
     metrics = build_sku_metrics(
         stocks=stocks,
-        orders=orders_28d,
+        orders=orders_raw,
         sales=sales_current,
         prev_sales=sales_prev,
         report_detail=report_detail,

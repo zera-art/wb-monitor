@@ -42,14 +42,16 @@ GROUP_COLORS = {
 
 # Partial keyword → row background color for РЕШЕНИЯ data rows
 STATUS_ROW_COLORS = {
-    "КРИТИЧНЫЙ":      "#FEE2E2",
-    "ЗАМЕДЛЕННАЯ":    "#FFEDD5",
-    "МЁРТВЫЙ":        "#F3F4F6",
-    "НУЖНА ПОСТАВКА": "#DBEAFE",
-    "НЕЭФФЕКТИВНА":   "#FEF9C3",
-    "ПОДНЯТЬ ЦЕНУ":   "#DCFCE7",
-    "НОРМАЛИЗАЦИЯ":   "#F0FDF4",
-    "ЦЕНА ПОДНЯТА":   "#bbdefb",
+    "КРИТИЧНЫЙ":       "#FEE2E2",
+    "ЗАМЕДЛЕННАЯ":     "#FFEDD5",
+    "МЁРТВЫЙ":         "#F3F4F6",
+    "НЕТ В НАЛИЧИИ":  "#E5E7EB",
+    "ВЫВЕДЕН":         "#9CA3AF",
+    "НУЖНА ПОСТАВКА":  "#DBEAFE",
+    "НЕЭФФЕКТИВНА":    "#FEF9C3",
+    "ПОДНЯТЬ ЦЕНУ":    "#DCFCE7",
+    "НОРМАЛИЗАЦИЯ":    "#F0FDF4",
+    "ЦЕНА ПОДНЯТА":    "#bbdefb",
 }
 
 # Column indices in SHEET_HEADERS (0-based)
@@ -95,6 +97,7 @@ class SheetsWriter:
         "🚚 ПОСТАВКИ Казань",
         "🚚 ПОСТАВКИ Краснодар",
         "🚚 ПОСТАВКИ Екатеринбург",
+        "📦 АРХИВ",
     ]
 
     # Column indices in ОЧЕРЕДЬ ИЗМЕНЕНИЙ (0-based)
@@ -258,14 +261,18 @@ class SheetsWriter:
                         f"товары: {self.EXCLUDED_NAMES})")
 
         summary = build_summary(display)
-        sorted_display = sorted(
+        # Все SKU для отображения (включая ВЫВЕДЕН для сортировки/архива)
+        all_sorted = sorted(
             display.values(),
             key=lambda m: (m.priority, -m.storage_cost_7d),
         )
-        logger.info(f"Обновляем дашборд: {len(display)} SKU")
+        # Исключаем "ВЫВЕДЕН" из РЕШЕНИЯ и ВСЕ SKU
+        sorted_display = [m for m in all_sorted if "ВЫВЕДЕН" not in m.status]
+        logger.info(f"Обновляем дашборд: {len(sorted_display)} SKU (исключено ВЫВЕДЕН: {len(all_sorted) - len(sorted_display)})")
         self._update_decisions(sorted_display)
         self._update_summary(summary, sorted_display)
         self._update_all_skus(sorted_display)
+        self._update_archive(list(display.values()))
         self._setup_rules_sheet()
         # ИСТОРИЯ — все SKU без фильтрации
         history_metrics = sorted(
@@ -543,6 +550,66 @@ class SheetsWriter:
         )
         self._batch(reqs)
 
+    # ── Sheet: АРХИВ ─────────────────────────────────────────────────────────
+
+    def _update_archive(self, metrics: list[SKUMetrics]):
+        """Лист АРХИВ — товары со статусом ВЫВЕДЕН ИЗ ПРОДАЖИ (без продаж 90+ дней)."""
+        ws = self._get_sheet("📦 АРХИВ")
+        ws.clear()
+        sheet_id = ws.id
+
+        archived = [m for m in metrics if "ВЫВЕДЕН" in m.status]
+        # Сортировка: сначала по sales_28d asc (все 0 для ВЫВЕДЕН), затем по sales_90d asc
+        archived.sort(key=lambda m: (m.sales_28d, m.sales_90d))
+
+        _ARCHIVE_HEADERS = [
+            "Артикул WB", "Название", "Категория",
+            "Последний заказ", "Дней без продаж",
+            "Последняя цена", "Остаток",
+        ]
+        ncols = len(_ARCHIVE_HEADERS)
+
+        title = f"АРХИВ — товары без продаж 90+ дней — обновлено {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        rows: list[list] = [
+            [title],
+            [""],
+            _ARCHIVE_HEADERS,
+        ]
+        for m in archived:
+            rows.append([
+                m.nm_id,
+                m.name[:40] if m.name else "—",
+                m.category[:30] if m.category else "—",
+                "—",          # Последний заказ — нет данных
+                90,           # Дней без продаж — фиксировано 90+ для ВЫВЕДЕН
+                m.final_price if m.final_price > 0 else "—",
+                m.stock,
+            ])
+
+        self._write(ws, rows)
+        time.sleep(1)
+
+        HEADER_ROW = 2   # 0-based index of _ARCHIVE_HEADERS row
+        reqs = [
+            self._unhide_all_cols_req(sheet_id),
+            # Заголовок листа
+            self._cell_req(sheet_id, 0, 1, 0, ncols, {
+                "textFormat": {"bold": True, "fontSize": 12},
+            }),
+            # Шапка колонок
+            self._header_req(sheet_id, HEADER_ROW, ncols),
+            self._freeze_req(sheet_id, HEADER_ROW + 1),
+            self._resize_req(sheet_id, ncols),
+        ]
+        # Цвет строк данных
+        if archived:
+            reqs.append(self._cell_req(sheet_id, HEADER_ROW + 1,
+                                       HEADER_ROW + 1 + len(archived), 0, ncols, {
+                "backgroundColor": _hex("#9CA3AF"),
+            }))
+        self._batch(reqs)
+        logger.info(f"Лист АРХИВ: {len(archived)} SKU")
+
     # ── Sheet 4: ИСТОРИЯ ─────────────────────────────────────────────────────
 
     def _save_history_snapshot(self, summary: dict, metrics: list[SKUMetrics]):
@@ -599,31 +666,39 @@ class SheetsWriter:
              "1 — Срочно"],
             ["🟠 ЗАМЕДЛЕННАЯ ОБОРАЧИВАЕМОСТЬ",
              "Оборачиваемость 60–90 дней",
-             "Снизить цену на 10–15% или усилить трафик. Запустить автокампанию если рекламы нет.",
+             "Снизить цену 10–15% или усилить трафик. Запустить автокампанию если рекламы нет.",
              "2 — Важно"],
             ["⚠️ РАСПРОДАЖА НЕЭФФЕКТИВНА",
              "Скидка > 20%, рост продаж ≤ 10%",
-             "Проблема не в цене: проверить позицию в поиске, CTR карточки, отзывы.",
+             "Проверить карточку, позицию в поиске, CTR, отзывы. Усилить рекламу.",
              "1 — Срочно"],
             ["🔵 НУЖНА ПОСТАВКА",
-             "Остаток < заказов за 7 дней",
-             "Срочно пополнить запас.",
+             "Остаток = 0 при наличии заказов или остаток < продаж за 7д",
+             "Пополнить запас.",
              "1 — Срочно"],
             ["🟢 ПОДНЯТЬ ЦЕНУ",
              "Оборачиваемость < 21 дня, есть остаток",
-             "Поднять цену согласно таблице правил (Раздел 2). Тестировать +5% каждые 3 дня.",
+             "Поднять цену по таблице правил (Раздел 2).",
              "3 — Мониторинг"],
             ["✅ НОРМАЛИЗАЦИЯ",
              "Спрос растёт > 20% к прошлой неделе",
-             "Продажи растут. Готовиться к плавному повышению цены.",
+             "Готовиться к повышению цены.",
              "3 — Мониторинг"],
             ["🔄 ЦЕНА ПОДНЯТА",
              "В прошлом запуске был статус ПОДНЯТЬ ЦЕНУ + текущая цена выросла более чем на 5%",
              "Мониторить спрос. Снимается если цена упала >3% (→ ПОДНЯТЬ ЦЕНУ) или оборачиваемость >21д (→ НОРМАЛИЗАЦИЯ).",
              "3 — Мониторинг"],
+            ["⬜ НЕТ В НАЛИЧИИ",
+             "Остаток = 0, продаж нет 28+ дней, но были в последние 90 дней",
+             "Пополнить при необходимости.",
+             "5"],
+            ["📦 ВЫВЕДЕН ИЗ ПРОДАЖИ",
+             "Остаток = 0, продаж нет 90+ дней",
+             "Перенесён в АРХИВ.",
+             "6"],
             ["🟡 МОНИТОРИНГ",
              "Все остальные случаи",
-             "Показатели в норме. Продолжать еженедельный мониторинг.",
+             "Продолжать мониторинг.",
              "4 — ОК"],
             [""],
 
@@ -665,14 +740,15 @@ class SheetsWriter:
         reqs.append(self._cell_req(sheet_id, 0, 1, 0, 4, {
             "textFormat": {"bold": True, "fontSize": 13},
         }))
-        # Заголовки разделов (строки 2, 13, 23, 28)
-        for row_idx in [2, 13, 23, 28]:
+        # Заголовки разделов:
+        # [2]  РАЗДЕЛ 1, [16] РАЗДЕЛ 2, [26] РАЗДЕЛ 3, [31] РАЗДЕЛ 4
+        for row_idx in [2, 16, 26, 31]:
             reqs.append(self._cell_req(sheet_id, row_idx, row_idx + 1, 0, 4, {
                 "backgroundColor": _hex(HEADER_BG),
                 "textFormat": {"bold": True, "foregroundColor": WHITE, "fontSize": 11},
             }))
         # Заголовки колонок разделов 1, 2 и 4
-        for row_idx in [3, 14, 29]:
+        for row_idx in [3, 17, 32]:
             reqs.append(self._header_req(sheet_id, row_idx, 4))
         # Заморозить первую строку
         reqs.append(self._freeze_req(sheet_id, 1))
