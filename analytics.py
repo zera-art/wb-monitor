@@ -29,6 +29,29 @@ THRESHOLDS = {
 }
 
 
+def calc_price_raise(turnover_days: float, demand_delta_pct: float,
+                     current_price: float) -> dict | None:
+    """
+    Рассчитывает рекомендованный подъём цены.
+    Возвращает {"raise_pct": int, "new_price": int} или None если поднимать не нужно.
+    Новая цена округляется до 10 руб вверх.
+    """
+    if turnover_days < 7:
+        raise_pct = 28
+    elif turnover_days < 14:
+        raise_pct = 20 if demand_delta_pct > 0 else 13
+    elif turnover_days < 21:
+        raise_pct = 11 if demand_delta_pct > 0 else 8
+    elif turnover_days < 30:
+        raise_pct = 7
+    else:
+        return None
+
+    raw_price = current_price * (1 + raise_pct / 100)
+    new_price = int((raw_price + 9) // 10 * 10)   # вверх до 10 руб
+    return {"raise_pct": raise_pct, "new_price": new_price}
+
+
 # ──────────────────────────────────────────────────────────────
 # Датаклассы
 # ──────────────────────────────────────────────────────────────
@@ -135,6 +158,15 @@ class SKUMetrics:
         def fmt_pct(v): return f"▲{v:.1f}%" if v > 0 else (f"▼{abs(v):.1f}%" if v < 0 else "0%")
         def fmt_days(v): return f"{v:.0f}" if v < 900 else "нет продаж"
 
+        # Новая цена: только для ПОДНЯТЬ ЦЕНУ и ЦЕНА ПОДНЯТА
+        if "ПОДНЯТЬ ЦЕНУ" in self.status:
+            result = calc_price_raise(self.turnover_days, self.sales_growth_pct, self.final_price)
+            new_price_cell = result["new_price"] if result else ""
+        elif "ЦЕНА ПОДНЯТА" in self.status:
+            new_price_cell = f"✓ {self.final_price:.0f}"
+        else:
+            new_price_cell = ""
+
         return [
             self.nm_id,
             self.name[:40] if self.name else "—",
@@ -149,6 +181,7 @@ class SKUMetrics:
             self.discount,
             self.forecast_date,
             self.status,
+            new_price_cell,
             self.recommendation,
         ]
 
@@ -159,7 +192,7 @@ SHEET_HEADERS = [
     "Оборачиваемость", "Δ к прошлой неделе",
     "Цена", "Скидка %",
     "Прогноз распродажи",
-    "Статус", "Рекомендация",
+    "Статус", "Новая цена", "Рекомендация",
 ]
 
 
@@ -488,3 +521,53 @@ def build_summary(metrics: dict[int, SKUMetrics]) -> dict:
         "status_breakdown": dict(by_status),
         "updated_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
+
+
+def apply_price_raised_status(metrics: dict[int, "SKUMetrics"],
+                               history: dict[int, dict]):
+    """
+    Пост-обработка: присваивает статус ЦЕНА ПОДНЯТА на основе данных предыдущего запуска.
+    history: {nm_id: {"status": str, "price": float}}
+
+    Правила:
+    - prev=ПОДНЯТЬ ЦЕНУ + текущая цена выросла >5% → ЦЕНА ПОДНЯТА
+    - prev=ЦЕНА ПОДНЯТА + цена упала >3%           → возврат к результату _classify (обычно ПОДНЯТЬ ЦЕНУ)
+    - prev=ЦЕНА ПОДНЯТА + оборачиваемость >21д     → НОРМАЛИЗАЦИЯ
+    - prev=ЦЕНА ПОДНЯТА + всё остальное            → держать ЦЕНА ПОДНЯТА
+    """
+    for nm_id, m in metrics.items():
+        prev = history.get(nm_id)
+        if not prev:
+            continue
+        prev_status = prev.get("status", "")
+        prev_price = float(prev.get("price", 0) or 0)
+        if prev_price <= 0:
+            continue
+
+        if "ПОДНЯТЬ ЦЕНУ" in prev_status:
+            if m.final_price > prev_price * 1.05:
+                m.status = "💰 ЦЕНА ПОДНЯТА"
+                m.recommendation = (
+                    f"Цена поднята с {prev_price:.0f} до {m.final_price:.0f} ₽ "
+                    f"(+{(m.final_price / prev_price - 1) * 100:.0f}%). "
+                    "Мониторить спрос и оборачиваемость."
+                )
+                m.priority = 3
+
+        elif "ЦЕНА ПОДНЯТА" in prev_status:
+            if m.final_price < prev_price * 0.97:
+                pass  # цена упала — _classify уже назначил нужный статус
+            elif m.turnover_days > 21:
+                m.status = "✅ НОРМАЛИЗАЦИЯ"
+                m.recommendation = (
+                    "Оборачиваемость снизилась после подъёма цены. "
+                    "Цена стабилизирована. Продолжать мониторинг."
+                )
+                m.priority = 3
+            else:
+                m.status = "💰 ЦЕНА ПОДНЯТА"
+                m.recommendation = (
+                    f"Цена удержана на {m.final_price:.0f} ₽. "
+                    "Мониторить спрос и оборачиваемость."
+                )
+                m.priority = 3

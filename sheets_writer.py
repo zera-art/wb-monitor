@@ -10,7 +10,7 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
-from analytics import SKUMetrics, SHEET_HEADERS, build_summary
+from analytics import SKUMetrics, SHEET_HEADERS, build_summary, apply_price_raised_status
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ STATUS_ROW_COLORS = {
     "НЕЭФФЕКТИВНА":   "#fff3e0",
     "НОРМАЛИЗАЦИЯ":   "#e8f5e9",
     "ПОДНЯТЬ ЦЕНУ":   "#c8e6c9",
+    "ЦЕНА ПОДНЯТА":   "#b2dfdb",
     "МАСШТАБИРОВАТЬ": "#e3f2fd",
     "МОНИТОРИНГ":     "#fffde7",
 }
@@ -82,6 +83,7 @@ class SheetsWriter:
         "📦 ВСЕ SKU",
         "📅 ИСТОРИЯ",
         "⚙️ НАСТРОЙКИ",
+        "📋 ПРАВИЛА",
     ]
 
     def __init__(self, credentials_path: str, spreadsheet_id: str):
@@ -215,6 +217,12 @@ class SheetsWriter:
     }
 
     def update_all(self, metrics: dict[int, SKUMetrics]):
+        # Читаем историю ДО записи нового снапшота — для статуса ЦЕНА ПОДНЯТА
+        history = self._read_history_snapshot()
+        if history:
+            apply_price_raised_status(metrics, history)
+            logger.info(f"История: применена к {len(history)} nmID")
+
         # Фильтруем исключённые категории и товары для всех листов кроме ИСТОРИИ
         display = {nm: m for nm, m in metrics.items()
                    if m.category not in self.EXCLUDED_CATEGORIES
@@ -234,6 +242,7 @@ class SheetsWriter:
         self._update_decisions(sorted_display)
         self._update_summary(summary, sorted_display)
         self._update_all_skus(sorted_display)
+        self._setup_rules_sheet()
         # ИСТОРИЯ — все SKU без фильтрации
         history_metrics = sorted(
             metrics.values(), key=lambda m: (m.priority, -m.storage_cost_7d)
@@ -505,6 +514,131 @@ class SheetsWriter:
             time.sleep(1)
 
         logger.info(f"История: добавлено {len(new_rows)} строк за {week_label}")
+
+    # ── Sheet: ПРАВИЛА ───────────────────────────────────────────────────────
+
+    def _setup_rules_sheet(self):
+        ws = self._get_sheet("📋 ПРАВИЛА")
+        ws.clear()
+        sheet_id = ws.id
+
+        rows = [
+            ["📋 ПРАВИЛА РАБОТЫ СИСТЕМЫ"], [""],
+
+            # Раздел 1
+            ["РАЗДЕЛ 1 — СТАТУСЫ И ДЕЙСТВИЯ", "", "", ""],
+            ["Статус", "Условие присвоения", "Действие", "Приоритет"],
+            ["🔴 КРИТИЧНЫЙ ОСТАТОК",
+             "Оборачиваемость > 90 дней",
+             "Увеличить скидку на 15% (до 50% макс.) или подключить акцию WB / внешний трафик.",
+             "1 — Срочно"],
+            ["🔴 МЁРТВЫЙ ОСТАТОК",
+             "Остаток > 10 шт, продаж нет 4+ недели, оборачиваемость ≥ 30 дней",
+             "Снизить цену до −50% или вывезти на самовыкуп. Проверить карточку, фото, SEO.",
+             "1 — Срочно"],
+            ["⚠️ РАСПРОДАЖА НЕЭФФЕКТИВНА",
+             "Оборачиваемость > 60 дней, скидка > 25%, рост продаж < 10%",
+             "Проблема не в цене. Проверить позицию в поиске, CTR карточки, отзывы. Усилить рекламу.",
+             "1 — Срочно"],
+            ["🟠 ЗАМЕДЛЕННАЯ ОБОРАЧИВАЕМОСТЬ",
+             "Оборачиваемость > 60 дней",
+             "Снизить цену на 10–15% или усилить трафик. Запустить автокампанию если рекламы нет.",
+             "2 — Важно"],
+            ["✅ НОРМАЛИЗАЦИЯ",
+             "Оборачиваемость ≤ 30 дней, рост продаж > 10%",
+             "Продажи растут, остаток нормализуется. Готовиться к плавному повышению цены.",
+             "3 — Мониторинг"],
+            ["🟢 ПОДНЯТЬ ЦЕНУ",
+             "Оборачиваемость ≤ 30 дней, есть остаток",
+             "Поднять цену согласно таблице правил (Раздел 2). Тестировать +5% каждые 3 дня.",
+             "3 — Мониторинг"],
+            ["💰 ЦЕНА ПОДНЯТА",
+             "В прошлом запуске был статус ПОДНЯТЬ ЦЕНУ + текущая цена выросла более чем на 5%",
+             "Мониторить спрос. Снимается если цена упала >3% (→ ПОДНЯТЬ ЦЕНУ) или оборачиваемость >21д (→ НОРМАЛИЗАЦИЯ).",
+             "3 — Мониторинг"],
+            ["🟡 МОНИТОРИНГ",
+             "Все остальные случаи",
+             "Показатели в норме. Продолжать еженедельный мониторинг.",
+             "4 — ОК"],
+            [""],
+
+            # Раздел 2
+            ["РАЗДЕЛ 2 — ПРАВИЛА ПОДЪЁМА ЦЕНЫ", "", "", ""],
+            ["Оборачиваемость (дней)", "Динамика спроса", "Подъём цены", "Примечание"],
+            ["< 7 дней",    "любая",   "+28%", "Срочное торможение — товар улетает"],
+            ["7–14 дней",   "растёт",  "+20%", "Спрос активный"],
+            ["7–14 дней",   "падает",  "+13%", "Осторожно — спрос снижается"],
+            ["14–21 день",  "растёт",  "+11%", "Плавная коррекция"],
+            ["14–21 день",  "падает",  "+8%",  "Минимальный сигнал"],
+            ["21–30 дней",  "любая",   "+7%",  "Профилактическое повышение"],
+            ["> 30 дней",   "любая",   "—",    "Не поднимать"],
+            [""],
+
+            # Раздел 3
+            ["РАЗДЕЛ 3 — ВАЖНО", "", "", ""],
+            ["⚠️ Перед подъёмом цены проверяйте Индекс цен WB —", "", "", ""],
+            ["если ваша цена станет выше конкурентов, WB может понизить позиции карточки.", "", "", ""],
+            ["Цены в колонке «Новая цена» округлены до 10 руб вверх.", "", "", ""],
+        ]
+
+        self._write(ws, rows)
+        time.sleep(1)
+
+        # Форматирование
+        reqs = [self._unhide_all_cols_req(sheet_id)]
+        # Заголовок
+        reqs.append(self._cell_req(sheet_id, 0, 1, 0, 4, {
+            "textFormat": {"bold": True, "fontSize": 13},
+        }))
+        # Заголовки разделов (строки 2, 13, 21)
+        for row_idx in [2, 13, 21]:
+            reqs.append(self._cell_req(sheet_id, row_idx, row_idx + 1, 0, 4, {
+                "backgroundColor": _hex(HEADER_BG),
+                "textFormat": {"bold": True, "foregroundColor": WHITE, "fontSize": 11},
+            }))
+        # Заголовки колонок разделов 1 и 2
+        for row_idx in [3, 14]:
+            reqs.append(self._header_req(sheet_id, row_idx, 4))
+        # Заморозить первую строку
+        reqs.append(self._freeze_req(sheet_id, 1))
+        reqs.append(self._resize_req(sheet_id, 4))
+        self._batch(reqs)
+        logger.info("Лист ПРАВИЛА обновлён")
+
+    # ── Чтение истории для статуса ЦЕНА ПОДНЯТА ──────────────────────────────
+
+    def _read_history_snapshot(self) -> dict[int, dict]:
+        """Последние записи из ИСТОРИИ per nmID: {nm_id: {status, price}}."""
+        try:
+            ws = self._get_sheet("📅 ИСТОРИЯ")
+            rows = ws.get_all_values()
+        except Exception:
+            return {}
+
+        if len(rows) < 2:
+            return {}
+
+        headers = rows[0]
+        try:
+            idx_nm     = headers.index("nmID")
+            idx_price  = headers.index("Цена")
+            idx_status = headers.index("Статус")
+        except ValueError:
+            return {}
+
+        snapshot: dict[int, dict] = {}
+        for row in rows[1:]:
+            if len(row) <= max(idx_nm, idx_price, idx_status):
+                continue
+            try:
+                nm_id = int(row[idx_nm])
+            except (ValueError, IndexError):
+                continue
+            snapshot[nm_id] = {
+                "status": row[idx_status],
+                "price":  float(row[idx_price]) if row[idx_price] else 0,
+            }
+        return snapshot
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
