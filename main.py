@@ -27,6 +27,7 @@ from wb_client import WBClient, WBAPIError
 from analytics import build_sku_metrics, build_summary, THRESHOLDS as ANALYTICS_THRESHOLDS
 from sheets_writer import SheetsWriter
 from notifier import TelegramNotifier
+from wb_price_sender import get_approved_changes, send_prices_to_wb
 
 # ──────────────────────────────────────────────────────────────
 # Настройка логирования
@@ -208,24 +209,69 @@ def run(dry_run: bool = False):
     except Exception:
         pass
 
+    today = datetime.now()
+    is_monday   = today.weekday() == 0
+    is_reminder = today.weekday() in (1, 2)   # вторник или среда
+
     # ── Запись в Google Sheets ────────────────────────────
+    tg: TelegramNotifier | None = None
+    if TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        tg = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+
     if not dry_run:
         logger.info("📝 Обновляем Google Sheets...")
+        sorted_display: list = []
         try:
-            sheets.update_all(metrics)
+            sorted_display = sheets.update_all(metrics)
             logger.info("  ✅ Google Sheets обновлён")
         except Exception as e:
             logger.error(f"  ✗ Ошибка Sheets: {e}")
 
-        # ── Telegram-уведомление ─────────────────────────
-        if TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            logger.info("📱 Отправляем Telegram-дайджест...")
+        # ── Telegram ежедневный дайджест ─────────────────
+        if tg:
             try:
-                tg = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
                 tg.send_daily_report(summary, urgent)
-                logger.info("  ✅ Telegram отправлен")
             except Exception as e:
-                logger.warning(f"  ✗ Telegram не отправлен: {e}")
+                logger.warning(f"  ✗ Telegram дайджест: {e}")
+
+        # ── Понедельник: обновить очередь изменений цен ──
+        if is_monday and sorted_display:
+            logger.info("📋 Понедельник — обновляем очередь изменений цен...")
+            try:
+                q = sheets.update_price_queue(sorted_display)
+                if q.get("skipped"):
+                    pending = sheets.queue_pending_count()
+                    logger.info(f"  Очередь не перезаписана: {pending} позиций не отправлено")
+                    if tg:
+                        tg.send_price_queue_reminder(pending)
+                else:
+                    logger.info(f"  Очередь: {q['total']} SKU "
+                                f"(↑{q['n_up']} повышений, ↓{q['n_down']} снижений)")
+                    if tg:
+                        tg.send_price_queue_ready(q["total"], q["n_up"], q["n_down"])
+            except Exception as e:
+                logger.error(f"  ✗ Ошибка очереди: {e}")
+
+        # ── Каждый день: отправить одобренные позиции ────
+        logger.info("💸 Проверяем одобренные изменения цен...")
+        try:
+            approved = get_approved_changes(sheets)
+            if approved:
+                logger.info(f"  Найдено {len(approved)} одобренных позиций — отправляем на WB")
+                result = send_prices_to_wb(approved, sheets, WB_KEYS["prices_key"])
+                if tg and result["total"] > 0:
+                    tg.send_prices_sent(result["n_up"], result["n_down"], result["total"])
+            else:
+                logger.info("  Нет позиций для отправки")
+                # Вторник/среда: напоминание о несогласованных позициях
+                if is_reminder:
+                    unapproved = sheets.queue_unapproved_count()
+                    if unapproved > 0:
+                        logger.info(f"  Напоминание: {unapproved} позиций ожидают согласования")
+                        if tg:
+                            tg.send_price_queue_reminder(unapproved)
+        except Exception as e:
+            logger.error(f"  ✗ Ошибка отправки цен: {e}")
     else:
         logger.info("⚠️  DRY RUN — запись в Sheets пропущена")
 

@@ -29,6 +29,40 @@ THRESHOLDS = {
 }
 
 
+FLOOR_PRICES: dict[str, int] = {
+    "Подушки декоративные": 450,
+    "Валики":               450,
+    "Сухоцветы":            800,
+}
+DEFAULT_FLOOR_PRICE = 200
+
+
+def calc_price_decrease(turnover_days: float, current_price: float,
+                        category: str, has_no_sales_14d: bool = False) -> dict | None:
+    """
+    Рассчитывает рекомендованное снижение цены.
+    Возвращает {"decrease_pct": int, "new_price": int, "is_floor_price": bool} или None.
+    Новая цена округляется вниз до 10 руб.
+    Не снижается ниже floor price по категории.
+    """
+    if has_no_sales_14d:
+        decrease_pct = 30
+    elif turnover_days > 180:
+        decrease_pct = 30
+    elif turnover_days > 90:
+        decrease_pct = 20
+    elif turnover_days > 60:
+        decrease_pct = 10
+    else:
+        return None
+
+    raw_price = current_price * (1 - decrease_pct / 100)
+    floor_price = FLOOR_PRICES.get(category, DEFAULT_FLOOR_PRICE)
+    is_floor_price = raw_price < floor_price
+    new_price = int(floor_price if is_floor_price else (raw_price // 10 * 10))
+    return {"decrease_pct": decrease_pct, "new_price": new_price, "is_floor_price": is_floor_price}
+
+
 def calc_price_raise(turnover_days: float, demand_delta_pct: float,
                      current_price: float) -> dict | None:
     """
@@ -158,12 +192,20 @@ class SKUMetrics:
         def fmt_pct(v): return f"▲{v:.1f}%" if v > 0 else (f"▼{abs(v):.1f}%" if v < 0 else "0%")
         def fmt_days(v): return f"{v:.0f}" if v < 900 else "нет продаж"
 
-        # Новая цена: только для ПОДНЯТЬ ЦЕНУ и ЦЕНА ПОДНЯТА
         if "ПОДНЯТЬ ЦЕНУ" in self.status:
             result = calc_price_raise(self.turnover_days, self.sales_growth_pct, self.final_price)
             new_price_cell = result["new_price"] if result else ""
         elif "ЦЕНА ПОДНЯТА" in self.status:
             new_price_cell = f"✓ {self.final_price:.0f}"
+        elif "МЁРТВЫЙ" in self.status or "ЗАМЕДЛЕННАЯ" in self.status:
+            has_no_sales = self.sales_7d < 0.5 and self.sales_prev_7d < 0.5
+            dec = calc_price_decrease(self.turnover_days, self.final_price, self.category,
+                                      has_no_sales_14d=has_no_sales)
+            if dec:
+                new_price_cell = (f"{dec['new_price']} руб (min)"
+                                  if dec["is_floor_price"] else dec["new_price"])
+            else:
+                new_price_cell = ""
         else:
             new_price_cell = ""
 
@@ -211,9 +253,16 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
     if (m.stock > 10
             and m.sales_28d < 1
             and m.turnover_days >= t["normal_turnover_days"]):
+        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category, has_no_sales_14d=True)
+        if dec and dec["is_floor_price"]:
+            price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
+        elif dec:
+            price_rec = f"Снизить цену до {dec['new_price']} руб (-{dec['decrease_pct']}%)"
+        else:
+            price_rec = "Снизить цену до -30%"
         return (
             "🔴 МЁРТВЫЙ ОСТАТОК",
-            "Продаж нет 4+ недели. Дропнуть цену до -50% или вывезти на самовыкуп. "
+            f"Продаж нет 4+ недели. {price_rec}. "
             "Проверить карточку, фото, SEO.",
             1
         )
@@ -246,6 +295,15 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
 
     # 4. Замедленная оборачиваемость — нужна реклама
     if m.turnover_days > t["slow_turnover_days"]:
+        has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
+        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
+                                  has_no_sales_14d=has_no_sales)
+        if dec and dec["is_floor_price"]:
+            price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
+        elif dec:
+            price_rec = f"Снизить цену до {dec['new_price']} руб (-{dec['decrease_pct']}%)"
+        else:
+            price_rec = "Снизить цену на 10–15%"
         ad_hint = (
             "Реклама уже идёт. Проверить ставки и релевантность фраз."
             if m.ad_spend_7d > 0 else
@@ -253,8 +311,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
         )
         return (
             "🟠 ЗАМЕДЛЕННАЯ ОБОРАЧИВАЕМОСТЬ",
-            f"Оборачиваемость {m.turnover_days:.0f} дней. "
-            f"Снизить цену на 10–15% или усилить трафик. {ad_hint}",
+            f"Оборачиваемость {m.turnover_days:.0f} дней. {price_rec}. {ad_hint}",
             2
         )
 

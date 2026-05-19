@@ -52,3 +52,24 @@ class TelegramNotifier:
 
         text += "\n🔗 Открыть дашборд в Google Sheets"
         self.send(text)
+
+    def send_price_queue_ready(self, total: int, n_up: int, n_down: int):
+        """Понедельник: новый список изменений цен сформирован."""
+        text = (
+            f"📋 Список изменений цен готов: {total} SKU\n"
+            f"⬆️ Повышение: {n_up} | ⬇️ Снижение: {n_down}\n"
+            f"Согласуйте → лист ОЧЕРЕДЬ ИЗМЕНЕНИЙ"
+        )
+        self.send(text)
+
+    def send_price_queue_reminder(self, n_pending: int):
+        """Вторник/среда: напоминание о несогласованных позициях."""
+        self.send(f"⏰ Ожидает согласования: {n_pending} SKU")
+
+    def send_prices_sent(self, n_up: int, n_down: int, total: int):
+        """После успешной отправки цен на WB."""
+        text = (
+            f"✅ Цены обновлены: {total} SKU\n"
+            f"⬆️ Повышено: {n_up} | ⬇️ Снижено: {n_down}"
+        )
+        self.send(text)

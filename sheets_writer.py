@@ -10,7 +10,9 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
-from analytics import SKUMetrics, SHEET_HEADERS, build_summary, apply_price_raised_status
+from analytics import (SKUMetrics, SHEET_HEADERS, build_summary,
+                       apply_price_raised_status,
+                       calc_price_raise, calc_price_decrease)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +86,20 @@ class SheetsWriter:
         "📅 ИСТОРИЯ",
         "⚙️ НАСТРОЙКИ",
         "📋 ПРАВИЛА",
+        "📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ",
     ]
+
+    # Column indices in ОЧЕРЕДЬ ИЗМЕНЕНИЙ (0-based)
+    _Q_NM_ID   = 0
+    _Q_NAME    = 1
+    _Q_CAT     = 2
+    _Q_CUR     = 3
+    _Q_NEW     = 4
+    _Q_PCT     = 5
+    _Q_REASON  = 6
+    _Q_DATE    = 7
+    _Q_APPROVE = 8
+    _Q_SENT    = 9
 
     def __init__(self, credentials_path: str, spreadsheet_id: str):
         creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
@@ -216,7 +231,8 @@ class SheetsWriter:
         "Корень лопуха",
     }
 
-    def update_all(self, metrics: dict[int, SKUMetrics]):
+    def update_all(self, metrics: dict[int, SKUMetrics]) -> list[SKUMetrics]:
+        """Обновить все листы. Возвращает отфильтрованный отсортированный список SKU."""
         # Читаем историю ДО записи нового снапшота — для статуса ЦЕНА ПОДНЯТА
         history = self._read_history_snapshot()
         if history:
@@ -249,6 +265,7 @@ class SheetsWriter:
         )
         self._save_history_snapshot(build_summary(metrics), history_metrics)
         logger.info("✅ Дашборд обновлён")
+        return sorted_display
 
     def setup_settings_sheet(self, thresholds: dict):
         ws = self._get_sheet("⚙️ НАСТРОЙКИ")
@@ -604,6 +621,147 @@ class SheetsWriter:
         reqs.append(self._resize_req(sheet_id, 4))
         self._batch(reqs)
         logger.info("Лист ПРАВИЛА обновлён")
+
+    # ── Лист ОЧЕРЕДЬ ИЗМЕНЕНИЙ ───────────────────────────────────────────────
+
+    _QUEUE_HEADERS = [
+        "Артикул", "Название", "Категория",
+        "Текущая цена", "Новая цена", "Изменение %",
+        "Причина", "Дата добавления", "Согласовано", "Отправлено",
+    ]
+
+    def update_price_queue(self, sorted_display: list[SKUMetrics]) -> dict:
+        """
+        Заполняет лист ОЧЕРЕДЬ ИЗМЕНЕНИЙ на понедельник.
+        Очищает только если все позиции прошлой недели уже отправлены.
+        Возвращает {"skipped": True} если очистка не произошла, иначе {total, n_up, n_down}.
+        """
+        if not self._queue_all_sent():
+            logger.info("Очередь изменений: есть неотправленные позиции, пропускаем перезапись")
+            return {"skipped": True}
+
+        ws = self._get_sheet("📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ")
+        sheet_id = ws.id
+        today_str = datetime.now().strftime("%d.%m.%Y")
+
+        rows = [self._QUEUE_HEADERS]
+        n_up = n_down = 0
+
+        for m in sorted_display:
+            if "РАСПРОДАЖА НЕЭФФЕКТИВНА" in m.status:
+                continue
+
+            if "ПОДНЯТЬ ЦЕНУ" in m.status:
+                result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.final_price)
+                if not result:
+                    continue
+                rows.append([
+                    m.nm_id, m.name[:40], m.category,
+                    m.final_price, result["new_price"],
+                    f"+{result['raise_pct']}%",
+                    "Поднять цену", today_str, False, "",
+                ])
+                n_up += 1
+
+            elif "МЁРТВЫЙ" in m.status or "ЗАМЕДЛЕННАЯ" in m.status:
+                has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
+                dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
+                                          has_no_sales_14d=has_no_sales)
+                if not dec:
+                    continue
+                new_p_display = (f"{dec['new_price']} руб (min)"
+                                 if dec["is_floor_price"] else dec["new_price"])
+                rows.append([
+                    m.nm_id, m.name[:40], m.category,
+                    m.final_price, new_p_display,
+                    f"-{dec['decrease_pct']}%",
+                    "Снизить цену", today_str, False, "",
+                ])
+                n_down += 1
+
+        ws.clear()
+        if len(rows) > 1:
+            ws.update("A1", rows, value_input_option="USER_ENTERED")
+        else:
+            ws.update("A1", [self._QUEUE_HEADERS], value_input_option="USER_ENTERED")
+
+        time.sleep(1)
+
+        # Форматирование и чекбоксы
+        n_data = len(rows) - 1
+        reqs = [
+            self._unhide_all_cols_req(sheet_id),
+            self._header_req(sheet_id, 0, len(self._QUEUE_HEADERS)),
+            self._freeze_req(sheet_id, 1),
+            self._resize_req(sheet_id, len(self._QUEUE_HEADERS)),
+        ]
+        if n_data > 0:
+            # Чекбоксы в колонке "Согласовано"
+            reqs.append({
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 1 + n_data,
+                        "startColumnIndex": self._Q_APPROVE,
+                        "endColumnIndex": self._Q_APPROVE + 1,
+                    },
+                    "rule": {
+                        "condition": {"type": "BOOLEAN"},
+                        "strict": True,
+                        "showCustomUi": True,
+                    },
+                }
+            })
+        self._batch(reqs)
+
+        total = n_up + n_down
+        logger.info(f"Очередь изменений: {total} SKU (↑{n_up} повышений, ↓{n_down} снижений)")
+        return {"total": total, "n_up": n_up, "n_down": n_down}
+
+    def queue_all_sent(self) -> bool:
+        """True если очередь пуста или все позиции имеют заполненное поле «Отправлено»."""
+        rows = self._get_queue_rows()
+        data = [r for r in rows[1:] if r and r[0].strip()]
+        if not data:
+            return True
+        return all(
+            len(r) > self._Q_SENT and r[self._Q_SENT].strip()
+            for r in data
+        )
+
+    def _queue_all_sent(self) -> bool:
+        return self.queue_all_sent()
+
+    def queue_pending_count(self) -> int:
+        """Количество позиций где «Отправлено» пустое (ещё не отправлены)."""
+        rows = self._get_queue_rows()
+        return sum(
+            1 for r in rows[1:]
+            if r and r[0].strip()
+            and not (len(r) > self._Q_SENT and r[self._Q_SENT].strip())
+        )
+
+    def queue_unapproved_count(self) -> int:
+        """Количество позиций ожидающих согласования (Согласовано != TRUE, Отправлено пустое)."""
+        rows = self._get_queue_rows()
+        count = 0
+        for r in rows[1:]:
+            if not r or not r[0].strip():
+                continue
+            approved = (len(r) > self._Q_APPROVE
+                        and r[self._Q_APPROVE].strip().upper() in ("TRUE", "ИСТИНА", "1"))
+            sent = len(r) > self._Q_SENT and r[self._Q_SENT].strip()
+            if not approved and not sent:
+                count += 1
+        return count
+
+    def _get_queue_rows(self) -> list[list]:
+        try:
+            ws = self._get_sheet("📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ")
+            return ws.get_all_values()
+        except Exception:
+            return []
 
     # ── Чтение истории для статуса ЦЕНА ПОДНЯТА ──────────────────────────────
 
