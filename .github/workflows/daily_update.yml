@@ -35,7 +35,14 @@ jobs:
       - name: Создать google_credentials.json из секрета
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: printf '%s' "$GOOGLE_CREDS" > google_credentials.json
+        run: |
+          python3 -c "
+          import os, json
+          raw = os.environ['GOOGLE_CREDS'].lstrip('﻿\r\n ')
+          data = json.loads(raw)
+          with open('google_credentials.json', 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+          "
 
       - name: Запустить мониторинг
         env:
