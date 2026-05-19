@@ -123,9 +123,6 @@ class SKUMetrics:
     spp_pct: float = 0.0
     spp_price: float = 0.0
 
-    # Средняя цена покупки (из nm-report)
-    buyer_price: float = 0.0
-    wb_discount_rub: float = 0.0
 
     # Реклама
     ad_spend_7d: float = 0.0
@@ -229,8 +226,6 @@ class SKUMetrics:
             fmt_pct(self.sales_growth_pct),
             self.final_price,
             self.discount,
-            round(self.buyer_price) if self.buyer_price > 0 else "",
-            round(self.wb_discount_rub) if self.wb_discount_rub > 0 else "",
             round(self.spp_pct, 1) if self.spp_pct > 0 else "",
             self.spp_price if self.spp_price > 0 else "",
             self.forecast_date,
@@ -244,7 +239,7 @@ SHEET_HEADERS = [
     "Артикул WB", "Название", "Категория",
     "Остаток", "Заказы 7д", "Заказы 28д", "Ср. заказов/нед",
     "Оборачиваемость", "Δ к прошлой неделе",
-    "Цена", "Скидка %", "Ср. цена покупки", "Скидка WB (руб)", "СПП %", "Цена СПП",
+    "Цена", "Скидка %", "СПП %", "Цена СПП",
     "Прогноз распродажи",
     "Статус", "Новая цена", "Рекомендация",
 ]

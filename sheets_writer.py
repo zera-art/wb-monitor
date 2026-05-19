@@ -53,10 +53,8 @@ STATUS_ROW_COLORS = {
 }
 
 # Column indices in SHEET_HEADERS (0-based)
-TURNOVER_COL     = SHEET_HEADERS.index("Оборачиваемость")
-BUYER_PRICE_COL  = SHEET_HEADERS.index("Ср. цена покупки")
-WB_DISCOUNT_COL  = SHEET_HEADERS.index("Скидка WB (руб)")
-SPP_PRICE_COL    = SHEET_HEADERS.index("Цена СПП")
+TURNOVER_COL  = SHEET_HEADERS.index("Оборачиваемость")
+SPP_PRICE_COL = SHEET_HEADERS.index("Цена СПП")
 
 
 def _status_color(status: str) -> str | None:
@@ -345,30 +343,29 @@ class SheetsWriter:
         self._write(ws, rows)
         time.sleep(1)
 
-        def _col_cf(col_idx: int, color: str, index: int) -> dict:
-            return {
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [{"sheetId": sheet_id, "startRowIndex": 2,
-                                    "startColumnIndex": col_idx,
-                                    "endColumnIndex": col_idx + 1}],
-                        "booleanRule": {
-                            "condition": {"type": "NOT_BLANK"},
-                            "format": {"backgroundColor": _hex(color)},
-                        },
+        spp_col_fmt = {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{
+                        "sheetId": sheet_id,
+                        "startRowIndex": 2,
+                        "startColumnIndex": SPP_PRICE_COL,
+                        "endColumnIndex": SPP_PRICE_COL + 1,
+                    }],
+                    "booleanRule": {
+                        "condition": {"type": "NOT_BLANK"},
+                        "format": {"backgroundColor": _hex("#c8e6c9")},
                     },
-                    "index": index,
-                }
+                },
+                "index": 0,
             }
-
+        }
         self._batch(
             [self._unhide_all_cols_req(sheet_id)]
             + self._delete_cf_rules(sheet_id)
             + fmt_reqs
             + [
-                _col_cf(BUYER_PRICE_COL, "#e8f5e9", 0),   # светло-зелёный
-                _col_cf(WB_DISCOUNT_COL, "#e3f2fd", 1),   # светло-голубой
-                _col_cf(SPP_PRICE_COL,   "#c8e6c9", 2),   # зелёный (Цена СПП)
+                spp_col_fmt,
                 self._freeze_req(sheet_id, 1),
                 self._resize_req(sheet_id),
             ]
@@ -517,39 +514,7 @@ class SheetsWriter:
                         "index": 0,
                     }
                 },
-                # Ср. цена покупки: светло-зелёный
-                {
-                    "addConditionalFormatRule": {
-                        "rule": {
-                            "ranges": [{"sheetId": sheet_id,
-                                        "startRowIndex": DATA_START,
-                                        "startColumnIndex": BUYER_PRICE_COL,
-                                        "endColumnIndex": BUYER_PRICE_COL + 1}],
-                            "booleanRule": {
-                                "condition": {"type": "NOT_BLANK"},
-                                "format": {"backgroundColor": _hex("#e8f5e9")},
-                            },
-                        },
-                        "index": 1,
-                    }
-                },
-                # Скидка WB (руб): светло-голубой
-                {
-                    "addConditionalFormatRule": {
-                        "rule": {
-                            "ranges": [{"sheetId": sheet_id,
-                                        "startRowIndex": DATA_START,
-                                        "startColumnIndex": WB_DISCOUNT_COL,
-                                        "endColumnIndex": WB_DISCOUNT_COL + 1}],
-                            "booleanRule": {
-                                "condition": {"type": "NOT_BLANK"},
-                                "format": {"backgroundColor": _hex("#e3f2fd")},
-                            },
-                        },
-                        "index": 2,
-                    }
-                },
-                # Цена СПП: зелёный
+                # Цена СПП: светло-зелёный
                 {
                     "addConditionalFormatRule": {
                         "rule": {
@@ -564,7 +529,7 @@ class SheetsWriter:
                                 "format": {"backgroundColor": _hex("#c8e6c9")},
                             },
                         },
-                        "index": 3,
+                        "index": 1,
                     }
                 },
                 self._freeze_req(sheet_id, DATA_START),   # freeze title+empty+headers

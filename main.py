@@ -174,15 +174,6 @@ def run(dry_run: bool = False):
     except Exception as e:
         logger.warning(f"  ✗ Ошибка СПП (не критично): {e}")
 
-    # ── Блок 9: Средняя цена покупки ───────────────────────
-    logger.info("💳 Загружаем среднюю цену покупки (buyerPrice)...")
-    buyer_price_data: dict = {}
-    try:
-        buyer_price_data = wb.get_buyer_price_data()
-        logger.info(f"  → Ср. цена покупки: {len(buyer_price_data)} nmID")
-    except Exception as e:
-        logger.warning(f"  ✗ Ошибка ср. цены покупки (не критично): {e}")
-
     # ── Аналитика ─────────────────────────────────────────
     logger.info("🧮 Считаем метрики и статусы...")
     metrics = build_sku_metrics(
@@ -202,16 +193,6 @@ def run(dry_run: bool = False):
         if nm_id in metrics:
             metrics[nm_id].spp_pct   = spp["spp_pct"]
             metrics[nm_id].spp_price = spp["spp_price"]
-
-    # Применяем среднюю цену покупки к метрикам.
-    # wb_discount_rub = final_price (цена продавца) - buyer_price (фактическая цена покупателя)
-    for nm_id, bp in buyer_price_data.items():
-        if nm_id in metrics:
-            buyer_price = bp["buyer_price"]
-            metrics[nm_id].buyer_price     = buyer_price
-            metrics[nm_id].wb_discount_rub = max(
-                0, round(metrics[nm_id].final_price - buyer_price)
-            )
 
     summary = build_summary(metrics)
     logger.info(
