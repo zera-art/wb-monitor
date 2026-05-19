@@ -19,7 +19,7 @@ THRESHOLDS = {
     "critical_turnover_days": 90,       # > 90 дней → критичный остаток
     "slow_turnover_days": 60,           # 60–90 дней → замедленная оборачиваемость
     "normal_turnover_days": 30,         # 14–30 дней → норма
-    "price_raise_turnover_days": 14,    # < 14 дней → можно поднимать цену
+    "price_raise_turnover_days": 30,    # < 30 дней → можно поднимать цену
     "min_sales_for_analysis": 1,        # мин. продаж/нед для анализа
     "clearance_ineffective_discount": 25,  # скидка > 25% при нулевом росте
     "sales_growth_threshold": 0.10,     # рост продаж > 10% = позитивная динамика
@@ -270,14 +270,26 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
 
     # 7. Можно повышать цену
     if m.turnover_days <= t["price_raise_turnover_days"] and m.stock > 0:
-        raise_by = max(5, min(15, int(100 / max(m.turnover_days, 1))))
-        return (
-            "🟢 ПОДНЯТЬ ЦЕНУ",
-            f"Оборачиваемость {m.turnover_days:.0f} дней — товар улетает. "
-            f"Поднять цену на {raise_by}% без риска падения продаж. "
-            "Тестировать +5% каждые 3 дня.",
-            3
-        )
+        result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.final_price)
+        if result:
+            new_p = result["new_price"]
+            pct   = result["raise_pct"]
+            td    = m.turnover_days
+            if td < 7:
+                rec = (f"Оборачиваемость {td:.0f} дней — товар улетает. "
+                       f"Поднять цену до {new_p} руб (+{pct}%)")
+            elif td < 14:
+                if m.sales_growth_pct > 0:
+                    rec = f"Поднять цену до {new_p} руб (+{pct}%). Спрос растёт — действовать уверенно"
+                else:
+                    rec = f"Поднять цену до {new_p} руб (+{pct}%). Спрос замедляется — действовать осторожно"
+            elif td < 21:
+                rec = f"Поднять цену до {new_p} руб (+{pct}%)"
+            else:
+                rec = f"Поднять цену до {new_p} руб (+{pct}%). Плавная коррекция"
+        else:
+            rec = f"Оборачиваемость {m.turnover_days:.0f} дней."
+        return ("🟢 ПОДНЯТЬ ЦЕНУ", rec, 3)
 
     # 7б. Реклама даёт хороший ДРР — масштабировать
     if (m.ad_spend_7d > 0
@@ -527,30 +539,59 @@ def apply_price_raised_status(metrics: dict[int, "SKUMetrics"],
                                history: dict[int, dict]):
     """
     Пост-обработка: присваивает статус ЦЕНА ПОДНЯТА на основе данных предыдущего запуска.
-    history: {nm_id: {"status": str, "price": float}}
+    history: {nm_id: {status, price, raise_date?, price_before?, turnover_before?}}
 
     Правила:
     - prev=ПОДНЯТЬ ЦЕНУ + текущая цена выросла >5% → ЦЕНА ПОДНЯТА
-    - prev=ЦЕНА ПОДНЯТА + цена упала >3%           → возврат к результату _classify (обычно ПОДНЯТЬ ЦЕНУ)
+    - prev=ЦЕНА ПОДНЯТА + цена упала >3%           → возврат к результату _classify
     - prev=ЦЕНА ПОДНЯТА + оборачиваемость >21д     → НОРМАЛИЗАЦИЯ
     - prev=ЦЕНА ПОДНЯТА + всё остальное            → держать ЦЕНА ПОДНЯТА
     """
+
+    def _parse_raise_date(week_str: str):
+        try:
+            return datetime.strptime(week_str.replace("Нед. ", ""), "%d.%m.%Y")
+        except (ValueError, AttributeError):
+            return None
+
+    def _build_rec(price_before: float, price_now: float,
+                   turnover_before: float, turnover_now: float,
+                   days_since: int) -> str:
+        base = (f"Цена поднята {days_since} дн. назад "
+                f"(с {price_before:.0f} → {price_now:.0f} ₽). "
+                f"Оборачиваемость: было {turnover_before:.0f}д, сейчас {turnover_now:.0f}д")
+        if days_since < 3:
+            verdict = "⏳ ждём реакции"
+        elif turnover_before > 0 and turnover_now < turnover_before * 0.95:
+            verdict = "✅ работает"
+        elif days_since >= 7:
+            verdict = "⚠️ нет эффекта, проверить конкурентов"
+        else:
+            verdict = "⏳ ждём реакции"
+        return f"{base}. {verdict}"
+
+    now = datetime.now()
+
     for nm_id, m in metrics.items():
         prev = history.get(nm_id)
         if not prev:
             continue
-        prev_status = prev.get("status", "")
-        prev_price = float(prev.get("price", 0) or 0)
+        prev_status   = prev.get("status", "")
+        prev_price    = float(prev.get("price", 0) or 0)
+        price_before  = float(prev.get("price_before", 0) or prev_price)
+        turnover_before = float(prev.get("turnover_before", 0) or 0)
+        raise_date    = _parse_raise_date(prev.get("raise_date", ""))
+        days_since    = (now - raise_date).days if raise_date else 0
+
         if prev_price <= 0:
             continue
 
         if "ПОДНЯТЬ ЦЕНУ" in prev_status:
             if m.final_price > prev_price * 1.05:
-                m.status = "💰 ЦЕНА ПОДНЯТА"
-                m.recommendation = (
-                    f"Цена поднята с {prev_price:.0f} до {m.final_price:.0f} ₽ "
-                    f"(+{(m.final_price / prev_price - 1) * 100:.0f}%). "
-                    "Мониторить спрос и оборачиваемость."
+                m.status = "🔄 ЦЕНА ПОДНЯТА"
+                m.recommendation = _build_rec(
+                    price_before or prev_price, m.final_price,
+                    turnover_before, m.turnover_days, days_since,
                 )
                 m.priority = 3
 
@@ -565,9 +606,9 @@ def apply_price_raised_status(metrics: dict[int, "SKUMetrics"],
                 )
                 m.priority = 3
             else:
-                m.status = "💰 ЦЕНА ПОДНЯТА"
-                m.recommendation = (
-                    f"Цена удержана на {m.final_price:.0f} ₽. "
-                    "Мониторить спрос и оборачиваемость."
+                m.status = "🔄 ЦЕНА ПОДНЯТА"
+                m.recommendation = _build_rec(
+                    price_before or prev_price, m.final_price,
+                    turnover_before, m.turnover_days, days_since,
                 )
                 m.priority = 3

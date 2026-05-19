@@ -45,7 +45,7 @@ STATUS_ROW_COLORS = {
     "НЕЭФФЕКТИВНА":   "#fff3e0",
     "НОРМАЛИЗАЦИЯ":   "#e8f5e9",
     "ПОДНЯТЬ ЦЕНУ":   "#c8e6c9",
-    "ЦЕНА ПОДНЯТА":   "#b2dfdb",
+    "ЦЕНА ПОДНЯТА":   "#bbdefb",
     "МАСШТАБИРОВАТЬ": "#e3f2fd",
     "МОНИТОРИНГ":     "#fffde7",
 }
@@ -552,7 +552,7 @@ class SheetsWriter:
              "Оборачиваемость ≤ 30 дней, есть остаток",
              "Поднять цену согласно таблице правил (Раздел 2). Тестировать +5% каждые 3 дня.",
              "3 — Мониторинг"],
-            ["💰 ЦЕНА ПОДНЯТА",
+            ["🔄 ЦЕНА ПОДНЯТА",
              "В прошлом запуске был статус ПОДНЯТЬ ЦЕНУ + текущая цена выросла более чем на 5%",
              "Мониторить спрос. Снимается если цена упала >3% (→ ПОДНЯТЬ ЦЕНУ) или оборачиваемость >21д (→ НОРМАЛИЗАЦИЯ).",
              "3 — Мониторинг"],
@@ -608,7 +608,11 @@ class SheetsWriter:
     # ── Чтение истории для статуса ЦЕНА ПОДНЯТА ──────────────────────────────
 
     def _read_history_snapshot(self) -> dict[int, dict]:
-        """Последние записи из ИСТОРИИ per nmID: {nm_id: {status, price}}."""
+        """
+        Последние записи из ИСТОРИИ per nmID.
+        Возвращает {nm_id: {status, price, raise_date?, price_before?, turnover_before?}}.
+        raise_date/price_before/turnover_before — из последней строки со статусом ПОДНЯТЬ ЦЕНУ.
+        """
         try:
             ws = self._get_sheet("📅 ИСТОРИЯ")
             rows = ws.get_all_values()
@@ -620,24 +624,51 @@ class SheetsWriter:
 
         headers = rows[0]
         try:
-            idx_nm     = headers.index("nmID")
-            idx_price  = headers.index("Цена")
-            idx_status = headers.index("Статус")
+            idx_nm       = headers.index("nmID")
+            idx_price    = headers.index("Цена")
+            idx_status   = headers.index("Статус")
+            idx_turnover = headers.index("Оборачив. дней")
+            idx_week     = headers.index("Неделя")
         except ValueError:
             return {}
 
-        snapshot: dict[int, dict] = {}
+        max_idx = max(idx_nm, idx_price, idx_status, idx_turnover, idx_week)
+        latest: dict[int, dict] = {}       # latest row per nm_id (overwrites each time)
+        last_raise: dict[int, dict] = {}   # last "ПОДНЯТЬ ЦЕНУ" row per nm_id
+
         for row in rows[1:]:
-            if len(row) <= max(idx_nm, idx_price, idx_status):
+            if len(row) <= max_idx:
                 continue
             try:
                 nm_id = int(row[idx_nm])
             except (ValueError, IndexError):
                 continue
-            snapshot[nm_id] = {
-                "status": row[idx_status],
-                "price":  float(row[idx_price]) if row[idx_price] else 0,
-            }
+
+            price   = float(row[idx_price]) if row[idx_price] else 0.0
+            status  = row[idx_status]
+            week    = row[idx_week]
+            try:
+                turnover = float(row[idx_turnover]) if row[idx_turnover] else 0.0
+            except ValueError:
+                turnover = 0.0
+
+            # Rows are chronological — last write wins for latest status/price
+            latest[nm_id] = {"status": status, "price": price}
+
+            if "ПОДНЯТЬ ЦЕНУ" in status:
+                last_raise[nm_id] = {
+                    "raise_date":      week,
+                    "price_before":    price,
+                    "turnover_before": turnover,
+                }
+
+        snapshot: dict[int, dict] = {}
+        for nm_id, data in latest.items():
+            entry = dict(data)
+            if nm_id in last_raise:
+                entry.update(last_raise[nm_id])
+            snapshot[nm_id] = entry
+
         return snapshot
 
     # ── Helpers ───────────────────────────────────────────────────────────────
