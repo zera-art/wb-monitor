@@ -34,7 +34,7 @@ jobs:
 
       - name: Создать google_credentials.json из секрета
         env:
-          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: printf '%s' "$GOOGLE_CREDS" > google_credentials.json
 
       - name: Запустить мониторинг
