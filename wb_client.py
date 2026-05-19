@@ -330,60 +330,60 @@ class WBClient:
     def get_buyer_price_data(self, date: str = None) -> dict[int, dict]:
         """
         Средняя цена покупки для всех nmID за вчера.
-        POST /api/v2/nm-report/detail — пустые фильтры = все товары.
+        POST /api/analytics/v3/sales-funnel/products (актуальный endpoint).
         Возвращает {nm_id: {"buyer_price": float, "wb_discount_rub": float}}.
-        buyer_price    = buyerPrice (средняя цена, которую заплатил покупатель)
-        wb_discount_rub = priceWithDiscount - buyerPrice (рублёвая скидка WB)
+        buyer_price     = statistic.selected.avgPrice
+        wb_discount_rub = priceWithDisc - avgPrice (рублёвая скидка WB)
         """
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         result: dict[int, dict] = {}
-        page = 1
+        limit  = 1000
+        offset = 0
         while True:
             payload = {
+                "selectedPeriod": {"start": date, "end": date},
+                "nmIds":      [],
                 "brandNames": [],
-                "objectIDs": [],
-                "tagIDs": [],
-                "nmIDs": [],
-                "timezone": "Europe/Moscow",
-                "period": {"begin": date, "end": date},
-                "orderBy": {"field": "ordersSumRub", "mode": "desc"},
-                "page": page,
+                "subjectIds": [],
+                "tagIds":     [],
+                "skipDeletedNm": False,
+                "limit":  limit,
+                "offset": offset,
             }
             try:
                 data = self._post(self.BASE_ANALYTIC,
-                                  "/api/v2/nm-report/detail", "analytics", payload)
+                                  "/api/analytics/v3/sales-funnel/products",
+                                  "analytics", payload)
             except Exception as e:
-                logger.warning(f"Ошибка get_buyer_price_data стр.{page}: {e}")
+                logger.warning(f"Ошибка get_buyer_price_data offset={offset}: {e}")
                 break
 
-            cards = (data.get("data") or {}).get("cards") or []
-            if not cards:
+            products = (data.get("data") or {}).get("products") or []
+            if not products:
                 break
 
-            for card in cards:
-                nm_id = card.get("nmID")
+            for item in products:
+                # nmId вложен в поле product: {"product": {"nmId": ...}, "statistic": {...}}
+                nm_id = (item.get("product") or {}).get("nmId")
                 if not nm_id:
                     continue
-                stats = ((card.get("statistics") or {})
-                         .get("selectedPeriod") or {})
-                buyer_price     = float(stats.get("buyerPrice", 0) or 0)
-                price_with_disc = float(stats.get("priceWithDiscount", 0) or 0)
-                if buyer_price <= 0:
+                selected  = ((item.get("statistic") or {})
+                             .get("selected") or {})
+                avg_price = float(selected.get("avgPrice", 0) or 0)
+                if avg_price <= 0:
                     continue
-                wb_discount_rub = max(0.0, price_with_disc - buyer_price)
-                result[nm_id] = {
-                    "buyer_price":     round(buyer_price),
-                    "wb_discount_rub": round(wb_discount_rub),
-                }
+                # wb_discount_rub вычисляется в main.py как final_price - buyer_price,
+                # т.к. priceWithDisc (цена продавца) берётся из отдельного prices-запроса
+                result[nm_id] = {"buyer_price": round(avg_price)}
 
-            if not (data.get("data") or {}).get("isNextPage"):
+            if len(products) < limit:
                 break
-            page += 1
-            time.sleep(0.5)
+            offset += limit
+            time.sleep(0.3)
 
-        logger.info(f"Ср. цена покупки: получено данных для {len(result)} nmID за {date}")
+        logger.info(f"Ср. цена покупки (avgPrice): {len(result)} nmID за {date}")
         return result
 
     def get_all_nm_reports(self, nm_ids: list[int],

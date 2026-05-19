@@ -203,11 +203,15 @@ def run(dry_run: bool = False):
             metrics[nm_id].spp_pct   = spp["spp_pct"]
             metrics[nm_id].spp_price = spp["spp_price"]
 
-    # Применяем среднюю цену покупки к метрикам
+    # Применяем среднюю цену покупки к метрикам.
+    # wb_discount_rub = final_price (цена продавца) - buyer_price (фактическая цена покупателя)
     for nm_id, bp in buyer_price_data.items():
         if nm_id in metrics:
-            metrics[nm_id].buyer_price     = bp["buyer_price"]
-            metrics[nm_id].wb_discount_rub = bp["wb_discount_rub"]
+            buyer_price = bp["buyer_price"]
+            metrics[nm_id].buyer_price     = buyer_price
+            metrics[nm_id].wb_discount_rub = max(
+                0, round(metrics[nm_id].final_price - buyer_price)
+            )
 
     summary = build_summary(metrics)
     logger.info(
