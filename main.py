@@ -162,6 +162,15 @@ def run(dry_run: bool = False):
     except WBAPIError as e:
         logger.warning(f"  ✗ Ошибка рекламы (не критично): {e}")
 
+    # ── Блок 8: СПП ────────────────────────────────────────
+    logger.info("🏷️  Загружаем данные СПП (скидка постоянного покупателя)...")
+    spp_data = {}
+    try:
+        spp_data = wb.get_spp_data()
+        logger.info(f"  → СПП получено для {len(spp_data)} nmID")
+    except Exception as e:
+        logger.warning(f"  ✗ Ошибка СПП (не критично): {e}")
+
     # ── Аналитика ─────────────────────────────────────────
     logger.info("🧮 Считаем метрики и статусы...")
     metrics = build_sku_metrics(
@@ -175,6 +184,12 @@ def run(dry_run: bool = False):
         ad_stats=ad_stats,
         cards=cards,
     )
+
+    # Применяем СПП к метрикам
+    for nm_id, spp in spp_data.items():
+        if nm_id in metrics:
+            metrics[nm_id].spp_pct   = spp["spp_pct"]
+            metrics[nm_id].spp_price = spp["spp_price"]
 
     summary = build_summary(metrics)
     logger.info(
@@ -234,8 +249,8 @@ def run(dry_run: bool = False):
             except Exception as e:
                 logger.warning(f"  ✗ Telegram дайджест: {e}")
 
-        # ── Понедельник: обновить очередь изменений цен ──
-        if is_monday and sorted_display:
+        # ── Понедельник или очередь пуста → обновить очередь изменений цен ──
+        if sorted_display and (is_monday or not sheets.queue_has_data()):
             logger.info("📋 Понедельник — обновляем очередь изменений цен...")
             try:
                 q = sheets.update_price_queue(sorted_display)
@@ -259,6 +274,23 @@ def run(dry_run: bool = False):
             if approved:
                 logger.info(f"  Найдено {len(approved)} одобренных позиций — отправляем на WB")
                 result = send_prices_to_wb(approved, sheets, WB_KEYS["prices_key"])
+                # Записать базу в ЭФФЕКТИВНОСТЬ для каждой отправленной позиции
+                for item in approved:
+                    nm_id = item["nm_id"]
+                    m = metrics.get(nm_id)
+                    if m and item["current_price"] > 0:
+                        action = ("Повышение" if item["new_price"] > item["current_price"]
+                                  else "Снижение")
+                        sheets.record_price_change(
+                            nm_id=nm_id,
+                            name=item["name"],
+                            category=m.category,
+                            action=action,
+                            price_before=item["current_price"],
+                            price_after=item["new_price"],
+                            orders_week=m.avg_weekly_sales,
+                            turnover_days=m.turnover_days,
+                        )
                 if tg and result["total"] > 0:
                     tg.send_prices_sent(result["n_up"], result["n_down"], result["total"])
             else:
@@ -272,6 +304,13 @@ def run(dry_run: bool = False):
                             tg.send_price_queue_reminder(unapproved)
         except Exception as e:
             logger.error(f"  ✗ Ошибка отправки цен: {e}")
+
+        # ── Ежедневно: проверить контрольные точки эффективности ──
+        logger.info("📈 Проверяем контрольные точки эффективности...")
+        try:
+            sheets.update_effectiveness_checkpoints(metrics)
+        except Exception as e:
+            logger.warning(f"  ✗ Ошибка эффективности (не критично): {e}")
     else:
         logger.info("⚠️  DRY RUN — запись в Sheets пропущена")
 

@@ -119,6 +119,10 @@ class SKUMetrics:
     # Хранение
     storage_cost_7d: float = 0.0  # стоимость хранения за 7 дней
 
+    # СПП (скидка постоянного покупателя)
+    spp_pct: float = 0.0
+    spp_price: float = 0.0
+
     # Реклама
     ad_spend_7d: float = 0.0
     ad_orders_7d: float = 0.0
@@ -221,6 +225,8 @@ class SKUMetrics:
             fmt_pct(self.sales_growth_pct),
             self.final_price,
             self.discount,
+            round(self.spp_pct, 1) if self.spp_pct > 0 else "",
+            self.spp_price if self.spp_price > 0 else "",
             self.forecast_date,
             self.status,
             new_price_cell,
@@ -232,7 +238,7 @@ SHEET_HEADERS = [
     "Артикул WB", "Название", "Категория",
     "Остаток", "Заказы 7д", "Заказы 28д", "Ср. заказов/нед",
     "Оборачиваемость", "Δ к прошлой неделе",
-    "Цена", "Скидка %",
+    "Цена", "Скидка %", "СПП %", "Цена СПП",
     "Прогноз распродажи",
     "Статус", "Новая цена", "Рекомендация",
 ]

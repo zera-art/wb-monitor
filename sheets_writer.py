@@ -52,8 +52,9 @@ STATUS_ROW_COLORS = {
     "МОНИТОРИНГ":     "#fffde7",
 }
 
-# Turnover column index in SHEET_HEADERS (0-based)
-TURNOVER_COL = SHEET_HEADERS.index("Оборачиваемость")
+# Column indices in SHEET_HEADERS (0-based)
+TURNOVER_COL  = SHEET_HEADERS.index("Оборачиваемость")
+SPP_PRICE_COL = SHEET_HEADERS.index("Цена СПП")
 
 
 def _status_color(status: str) -> str | None:
@@ -87,6 +88,7 @@ class SheetsWriter:
         "⚙️ НАСТРОЙКИ",
         "📋 ПРАВИЛА",
         "📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ",
+        "📊 ЭФФЕКТИВНОСТЬ",
     ]
 
     # Column indices in ОЧЕРЕДЬ ИЗМЕНЕНИЙ (0-based)
@@ -340,11 +342,29 @@ class SheetsWriter:
         self._write(ws, rows)
         time.sleep(1)
 
+        spp_col_fmt = {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{
+                        "sheetId": sheet_id,
+                        "startRowIndex": 2,
+                        "startColumnIndex": SPP_PRICE_COL,
+                        "endColumnIndex": SPP_PRICE_COL + 1,
+                    }],
+                    "booleanRule": {
+                        "condition": {"type": "NOT_BLANK"},
+                        "format": {"backgroundColor": _hex("#c8e6c9")},
+                    },
+                },
+                "index": 0,
+            }
+        }
         self._batch(
             [self._unhide_all_cols_req(sheet_id)]
             + self._delete_cf_rules(sheet_id)
             + fmt_reqs
             + [
+                spp_col_fmt,
                 self._freeze_req(sheet_id, 1),
                 self._resize_req(sheet_id),
             ]
@@ -491,6 +511,24 @@ class SheetsWriter:
                             },
                         },
                         "index": 0,
+                    }
+                },
+                # SPP price column: light green when not blank
+                {
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [{
+                                "sheetId": sheet_id,
+                                "startRowIndex": DATA_START,
+                                "startColumnIndex": SPP_PRICE_COL,
+                                "endColumnIndex": SPP_PRICE_COL + 1,
+                            }],
+                            "booleanRule": {
+                                "condition": {"type": "NOT_BLANK"},
+                                "format": {"backgroundColor": _hex("#c8e6c9")},
+                            },
+                        },
+                        "index": 1,
                     }
                 },
                 self._freeze_req(sheet_id, DATA_START),   # freeze title+empty+headers
@@ -762,6 +800,129 @@ class SheetsWriter:
             return ws.get_all_values()
         except Exception:
             return []
+
+    def queue_has_data(self) -> bool:
+        """True если в очереди есть хотя бы одна строка с данными."""
+        rows = self._get_queue_rows()
+        return any(r and r[0].strip() for r in rows[1:])
+
+    # ── Лист ЭФФЕКТИВНОСТЬ ────────────────────────────────────────────────────
+
+    _EFF_HEADERS = [
+        "Артикул", "Название", "Категория", "Действие",
+        "Цена до", "Цена после", "Изменение %", "Дата изменения",
+        "Точка", "Заказы/нед", "Оборачиваемость", "Итог",
+    ]
+
+    def record_price_change(self, nm_id: int, name: str, category: str,
+                            action: str, price_before: float, price_after: float,
+                            orders_week: float, turnover_days: float):
+        """Записывает базовую строку в ЭФФЕКТИВНОСТЬ при изменении цены."""
+        try:
+            ws = self._get_sheet("📊 ЭФФЕКТИВНОСТЬ")
+            existing = ws.get_all_values()
+            if not existing:
+                ws.append_row(self._EFF_HEADERS)
+            pct = (price_after / price_before - 1) * 100 if price_before > 0 else 0
+            pct_str = f"+{pct:.0f}%" if pct >= 0 else f"{pct:.0f}%"
+            row = [
+                nm_id, name[:40], category, action,
+                price_before, price_after, pct_str,
+                datetime.now().strftime("%d.%m.%Y"),
+                "База",
+                round(orders_week, 1), round(turnover_days, 0), "⏳",
+            ]
+            ws.append_row(row, value_input_option="USER_ENTERED")
+            logger.info(f"Эффективность: записана база для nmID={nm_id}")
+        except Exception as e:
+            logger.warning(f"Ошибка record_price_change nmID={nm_id}: {e}")
+
+    def update_effectiveness_checkpoints(self, metrics: dict[int, SKUMetrics]):
+        """
+        Проверяет ЭФФЕКТИВНОСТЬ и добавляет строки День 7 / День 14 если прошло нужное время.
+        Итог:
+        - Повышение ✅ если turnover_days > 21 (нормализовалось)
+        - Снижение ✅ если orders/нед выросли > 20%
+        """
+        try:
+            ws = self._get_sheet("📊 ЭФФЕКТИВНОСТЬ")
+            rows = ws.get_all_values()
+        except Exception:
+            return
+
+        if len(rows) < 2:
+            return
+
+        headers = rows[0]
+        try:
+            i_nm      = headers.index("Артикул")
+            i_name    = headers.index("Название")
+            i_cat     = headers.index("Категория")
+            i_action  = headers.index("Действие")
+            i_before  = headers.index("Цена до")
+            i_after   = headers.index("Цена после")
+            i_pct     = headers.index("Изменение %")
+            i_date    = headers.index("Дата изменения")
+            i_point   = headers.index("Точка")
+            i_orders  = headers.index("Заказы/нед")
+            i_turn    = headers.index("Оборачиваемость")
+        except ValueError:
+            return
+
+        now = datetime.now()
+        existing_keys: set[tuple] = set()
+        for r in rows[1:]:
+            if len(r) > max(i_nm, i_date, i_point):
+                existing_keys.add((r[i_nm], r[i_date], r[i_point]))
+
+        new_rows = []
+        for r in rows[1:]:
+            if len(r) <= max(i_nm, i_date, i_point, i_orders):
+                continue
+            if r[i_point] != "База":
+                continue
+            nm_id_str  = r[i_nm]
+            date_str   = r[i_date]
+            action     = r[i_action]
+            base_orders = float(r[i_orders]) if r[i_orders] else 0
+
+            try:
+                change_dt = datetime.strptime(date_str, "%d.%m.%Y")
+                nm_id     = int(nm_id_str)
+            except (ValueError, IndexError):
+                continue
+
+            days_passed = (now - change_dt).days
+            m = metrics.get(nm_id)
+            if not m:
+                continue
+
+            for point_name, min_days in [("День 7", 7), ("День 14", 14)]:
+                key = (nm_id_str, date_str, point_name)
+                if key in existing_keys or days_passed < min_days:
+                    continue
+
+                if point_name == "День 7":
+                    result = "⏳ ждём"
+                else:
+                    if action == "Повышение":
+                        result = "✅ работает" if m.turnover_days > 21 else "❌ нет эффекта"
+                    else:
+                        pct_chg = ((m.avg_weekly_sales - base_orders) / base_orders * 100
+                                   if base_orders > 0 else 0)
+                        result = "✅ работает" if pct_chg > 20 else "❌ нет эффекта"
+
+                new_rows.append([
+                    nm_id, m.name[:40], m.category, action,
+                    r[i_before], r[i_after], r[i_pct],
+                    date_str, point_name,
+                    round(m.avg_weekly_sales, 1), round(m.turnover_days, 0),
+                    result,
+                ])
+
+        if new_rows:
+            ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+            logger.info(f"Эффективность: добавлено {len(new_rows)} строк")
 
     # ── Чтение истории для статуса ЦЕНА ПОДНЯТА ──────────────────────────────
 
