@@ -327,6 +327,65 @@ class WBClient:
         logger.info(f"СПП: получено данных для {len(spp_data)} nmID за {date}")
         return spp_data
 
+    def get_buyer_price_data(self, date: str = None) -> dict[int, dict]:
+        """
+        Средняя цена покупки для всех nmID за вчера.
+        POST /api/v2/nm-report/detail — пустые фильтры = все товары.
+        Возвращает {nm_id: {"buyer_price": float, "wb_discount_rub": float}}.
+        buyer_price    = buyerPrice (средняя цена, которую заплатил покупатель)
+        wb_discount_rub = priceWithDiscount - buyerPrice (рублёвая скидка WB)
+        """
+        if date is None:
+            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        result: dict[int, dict] = {}
+        page = 1
+        while True:
+            payload = {
+                "brandNames": [],
+                "objectIDs": [],
+                "tagIDs": [],
+                "nmIDs": [],
+                "timezone": "Europe/Moscow",
+                "period": {"begin": date, "end": date},
+                "orderBy": {"field": "ordersSumRub", "mode": "desc"},
+                "page": page,
+            }
+            try:
+                data = self._post(self.BASE_ANALYTIC,
+                                  "/api/v2/nm-report/detail", "analytics", payload)
+            except Exception as e:
+                logger.warning(f"Ошибка get_buyer_price_data стр.{page}: {e}")
+                break
+
+            cards = (data.get("data") or {}).get("cards") or []
+            if not cards:
+                break
+
+            for card in cards:
+                nm_id = card.get("nmID")
+                if not nm_id:
+                    continue
+                stats = ((card.get("statistics") or {})
+                         .get("selectedPeriod") or {})
+                buyer_price     = float(stats.get("buyerPrice", 0) or 0)
+                price_with_disc = float(stats.get("priceWithDiscount", 0) or 0)
+                if buyer_price <= 0:
+                    continue
+                wb_discount_rub = max(0.0, price_with_disc - buyer_price)
+                result[nm_id] = {
+                    "buyer_price":     round(buyer_price),
+                    "wb_discount_rub": round(wb_discount_rub),
+                }
+
+            if not (data.get("data") or {}).get("isNextPage"):
+                break
+            page += 1
+            time.sleep(0.5)
+
+        logger.info(f"Ср. цена покупки: получено данных для {len(result)} nmID за {date}")
+        return result
+
     def get_all_nm_reports(self, nm_ids: list[int],
                            date_from: str, date_to: str = None) -> list[dict]:
         """Воронка для всех nmID с разбивкой по 20 штук."""

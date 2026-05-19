@@ -39,6 +39,11 @@ GOOGLE_CREDENTIALS_PATH = os.getenv(
 # ID таблицы из URL: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE")
 
+# ID документа Google Docs "Рекомендации к поставке WB"
+# Заполнится автоматически при первом создании документа (через supply_doc_writer).
+# Можно задать вручную из URL: https://docs.google.com/document/d/DOC_ID/edit
+GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID", "")
+
 # ──────────────────────────────────────────────────────────────
 # Пороговые значения (можно перенести в лист ⚙️ НАСТРОЙКИ)
 # ──────────────────────────────────────────────────────────────

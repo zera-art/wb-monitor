@@ -21,13 +21,16 @@ load_dotenv()
 from config import (
     WB_KEYS, GOOGLE_CREDENTIALS_PATH, SPREADSHEET_ID,
     THRESHOLDS, SALES_LOOKBACK_DAYS, STORAGE_LOOKBACK_DAYS,
-    ADS_LOOKBACK_DAYS, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    ADS_LOOKBACK_DAYS, TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+    GOOGLE_DOC_ID,
 )
 from wb_client import WBClient, WBAPIError
 from analytics import build_sku_metrics, build_summary, THRESHOLDS as ANALYTICS_THRESHOLDS
 from sheets_writer import SheetsWriter
 from notifier import TelegramNotifier
 from wb_price_sender import get_approved_changes, send_prices_to_wb
+from supply_analytics import calc_supply_recommendation
+from supply_doc_writer import create_or_update_supply_doc
 
 # ──────────────────────────────────────────────────────────────
 # Настройка логирования
@@ -171,6 +174,15 @@ def run(dry_run: bool = False):
     except Exception as e:
         logger.warning(f"  ✗ Ошибка СПП (не критично): {e}")
 
+    # ── Блок 9: Средняя цена покупки ───────────────────────
+    logger.info("💳 Загружаем среднюю цену покупки (buyerPrice)...")
+    buyer_price_data: dict = {}
+    try:
+        buyer_price_data = wb.get_buyer_price_data()
+        logger.info(f"  → Ср. цена покупки: {len(buyer_price_data)} nmID")
+    except Exception as e:
+        logger.warning(f"  ✗ Ошибка ср. цены покупки (не критично): {e}")
+
     # ── Аналитика ─────────────────────────────────────────
     logger.info("🧮 Считаем метрики и статусы...")
     metrics = build_sku_metrics(
@@ -190,6 +202,12 @@ def run(dry_run: bool = False):
         if nm_id in metrics:
             metrics[nm_id].spp_pct   = spp["spp_pct"]
             metrics[nm_id].spp_price = spp["spp_price"]
+
+    # Применяем среднюю цену покупки к метрикам
+    for nm_id, bp in buyer_price_data.items():
+        if nm_id in metrics:
+            metrics[nm_id].buyer_price     = bp["buyer_price"]
+            metrics[nm_id].wb_discount_rub = bp["wb_discount_rub"]
 
     summary = build_summary(metrics)
     logger.info(
@@ -311,6 +329,41 @@ def run(dry_run: bool = False):
             sheets.update_effectiveness_checkpoints(metrics)
         except Exception as e:
             logger.warning(f"  ✗ Ошибка эффективности (не критично): {e}")
+
+        # ── Ежедневно: рекомендации к поставке ───────────────────
+        logger.info("🚚 Рассчитываем рекомендации к поставке...")
+        supply_recs = []
+        try:
+            supply_recs = calc_supply_recommendation(wb, cards=cards)
+            sheets.update_supply_sheet(supply_recs)
+            logger.info(f"  → Лист ПОСТАВКИ обновлён: {len(supply_recs)} SKU")
+        except Exception as e:
+            logger.warning(f"  ✗ Ошибка поставок (не критично): {e}")
+
+        # ── Telegram: /поставки по команде или понедельник ────────
+        if tg:
+            supply_cmd = False
+            try:
+                supply_cmd = tg.poll_supply_command()
+            except Exception:
+                pass
+
+            if supply_cmd or is_monday:
+                logger.info("📦 Обновляем Google Doc рекомендаций к поставке...")
+                try:
+                    doc_url = create_or_update_supply_doc(
+                        supply_recs,
+                        credentials_path=GOOGLE_CREDENTIALS_PATH,
+                        doc_id=GOOGLE_DOC_ID or None,
+                    )
+                    if supply_cmd:
+                        tg.send_supply_report(supply_recs, doc_url)
+                    elif is_monday:
+                        n_urgent = sum(1 for r in supply_recs
+                                       if r.get("priority", "").startswith("🔴"))
+                        tg.send_supply_ready_monday(n_urgent, len(supply_recs))
+                except Exception as e:
+                    logger.warning(f"  ✗ Ошибка Google Doc поставок (не критично): {e}")
     else:
         logger.info("⚠️  DRY RUN — запись в Sheets пропущена")
 

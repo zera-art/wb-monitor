@@ -53,8 +53,10 @@ STATUS_ROW_COLORS = {
 }
 
 # Column indices in SHEET_HEADERS (0-based)
-TURNOVER_COL  = SHEET_HEADERS.index("Оборачиваемость")
-SPP_PRICE_COL = SHEET_HEADERS.index("Цена СПП")
+TURNOVER_COL     = SHEET_HEADERS.index("Оборачиваемость")
+BUYER_PRICE_COL  = SHEET_HEADERS.index("Ср. цена покупки")
+WB_DISCOUNT_COL  = SHEET_HEADERS.index("Скидка WB (руб)")
+SPP_PRICE_COL    = SHEET_HEADERS.index("Цена СПП")
 
 
 def _status_color(status: str) -> str | None:
@@ -89,6 +91,7 @@ class SheetsWriter:
         "📋 ПРАВИЛА",
         "📋 ОЧЕРЕДЬ ИЗМЕНЕНИЙ",
         "📊 ЭФФЕКТИВНОСТЬ",
+        "🚚 ПОСТАВКИ",
     ]
 
     # Column indices in ОЧЕРЕДЬ ИЗМЕНЕНИЙ (0-based)
@@ -342,29 +345,30 @@ class SheetsWriter:
         self._write(ws, rows)
         time.sleep(1)
 
-        spp_col_fmt = {
-            "addConditionalFormatRule": {
-                "rule": {
-                    "ranges": [{
-                        "sheetId": sheet_id,
-                        "startRowIndex": 2,
-                        "startColumnIndex": SPP_PRICE_COL,
-                        "endColumnIndex": SPP_PRICE_COL + 1,
-                    }],
-                    "booleanRule": {
-                        "condition": {"type": "NOT_BLANK"},
-                        "format": {"backgroundColor": _hex("#c8e6c9")},
+        def _col_cf(col_idx: int, color: str, index: int) -> dict:
+            return {
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{"sheetId": sheet_id, "startRowIndex": 2,
+                                    "startColumnIndex": col_idx,
+                                    "endColumnIndex": col_idx + 1}],
+                        "booleanRule": {
+                            "condition": {"type": "NOT_BLANK"},
+                            "format": {"backgroundColor": _hex(color)},
+                        },
                     },
-                },
-                "index": 0,
+                    "index": index,
+                }
             }
-        }
+
         self._batch(
             [self._unhide_all_cols_req(sheet_id)]
             + self._delete_cf_rules(sheet_id)
             + fmt_reqs
             + [
-                spp_col_fmt,
+                _col_cf(BUYER_PRICE_COL, "#e8f5e9", 0),   # светло-зелёный
+                _col_cf(WB_DISCOUNT_COL, "#e3f2fd", 1),   # светло-голубой
+                _col_cf(SPP_PRICE_COL,   "#c8e6c9", 2),   # зелёный (Цена СПП)
                 self._freeze_req(sheet_id, 1),
                 self._resize_req(sheet_id),
             ]
@@ -513,7 +517,39 @@ class SheetsWriter:
                         "index": 0,
                     }
                 },
-                # SPP price column: light green when not blank
+                # Ср. цена покупки: светло-зелёный
+                {
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [{"sheetId": sheet_id,
+                                        "startRowIndex": DATA_START,
+                                        "startColumnIndex": BUYER_PRICE_COL,
+                                        "endColumnIndex": BUYER_PRICE_COL + 1}],
+                            "booleanRule": {
+                                "condition": {"type": "NOT_BLANK"},
+                                "format": {"backgroundColor": _hex("#e8f5e9")},
+                            },
+                        },
+                        "index": 1,
+                    }
+                },
+                # Скидка WB (руб): светло-голубой
+                {
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [{"sheetId": sheet_id,
+                                        "startRowIndex": DATA_START,
+                                        "startColumnIndex": WB_DISCOUNT_COL,
+                                        "endColumnIndex": WB_DISCOUNT_COL + 1}],
+                            "booleanRule": {
+                                "condition": {"type": "NOT_BLANK"},
+                                "format": {"backgroundColor": _hex("#e3f2fd")},
+                            },
+                        },
+                        "index": 2,
+                    }
+                },
+                # Цена СПП: зелёный
                 {
                     "addConditionalFormatRule": {
                         "rule": {
@@ -528,7 +564,7 @@ class SheetsWriter:
                                 "format": {"backgroundColor": _hex("#c8e6c9")},
                             },
                         },
-                        "index": 1,
+                        "index": 3,
                     }
                 },
                 self._freeze_req(sheet_id, DATA_START),   # freeze title+empty+headers
@@ -989,6 +1025,96 @@ class SheetsWriter:
             snapshot[nm_id] = entry
 
         return snapshot
+
+    # ── Лист ПОСТАВКИ ────────────────────────────────────────────────────────
+
+    _SUPPLY_HEADERS = [
+        "Артикул", "Баркод", "Название", "Категория", "ABC",
+        "Кластер", "Склад WB", "Остаток", "Продажи/день",
+        "Потребность 28д", "Рекомендовать (шт)", "Дней до нуля", "Приоритет",
+    ]
+
+    SUPPLY_PRIORITY_COLORS = {
+        "🔴": "#ffcdd2",
+        "🟡": "#fff9c4",
+        "🟢": "#e8f5e9",
+    }
+
+    def update_supply_sheet(self, recommendations: list[dict]):
+        """Записывает рекомендации к поставке на лист 🚚 ПОСТАВКИ."""
+        ws = self._get_sheet("🚚 ПОСТАВКИ")
+        ws.clear()
+        sheet_id = ws.id
+
+        today_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        title = f"🚚 РЕКОМЕНДАЦИИ К ПОСТАВКЕ — обновлено {today_str}"
+
+        # Сводка по кластерам и приоритетам
+        clusters_count: dict[str, int] = {}
+        prio_count = {"🔴": 0, "🟡": 0, "🟢": 0}
+        for r in recommendations:
+            cl = r.get("cluster", "")
+            clusters_count[cl] = clusters_count.get(cl, 0) + 1
+            for emoji in prio_count:
+                if r.get("priority", "").startswith(emoji):
+                    prio_count[emoji] += 1
+
+        clusters_str = " | ".join(f"{k}: {v}" for k, v in sorted(clusters_count.items()))
+        summary = (f"Итого SKU: {len(recommendations)} | "
+                   f"🔴 Срочно: {prio_count['🔴']} | "
+                   f"🟡 Плановая: {prio_count['🟡']} | "
+                   f"🟢 Запас: {prio_count['🟢']}")
+
+        rows = [[title], [summary], [clusters_str], [""], self._SUPPLY_HEADERS]
+        fmt_reqs = [
+            self._cell_req(sheet_id, 0, 1, 0, len(self._SUPPLY_HEADERS), {
+                "textFormat": {"bold": True, "fontSize": 12},
+            }),
+            self._cell_req(sheet_id, 1, 3, 0, len(self._SUPPLY_HEADERS), {
+                "textFormat": {"bold": True, "fontSize": 10},
+            }),
+            self._header_req(sheet_id, 4, len(self._SUPPLY_HEADERS)),
+        ]
+
+        ri = 5
+        for r in sorted(recommendations,
+                         key=lambda x: (
+                             0 if x.get("priority", "").startswith("🔴") else
+                             1 if x.get("priority", "").startswith("🟡") else 2,
+                             -x.get("needed_28d", 0)
+                         )):
+            rows.append([
+                r.get("vendor_code", r.get("nm_id", "")),
+                r.get("barcode", ""),
+                r.get("name", "")[:40],
+                r.get("category", ""),
+                r.get("abc", ""),
+                r.get("cluster", ""),
+                r.get("warehouse", ""),
+                r.get("stock", 0),
+                round(r.get("sales_per_day", 0), 2),
+                r.get("needed_28d", 0),
+                r.get("recommended_qty", 0),
+                round(r.get("days_to_zero", 0), 1),
+                r.get("priority", ""),
+            ])
+            prio = r.get("priority", "")
+            for emoji, color in self.SUPPLY_PRIORITY_COLORS.items():
+                if prio.startswith(emoji):
+                    fmt_reqs.append(self._cell_req(
+                        sheet_id, ri, ri + 1, 0, len(self._SUPPLY_HEADERS),
+                        {"backgroundColor": _hex(color)},
+                    ))
+                    break
+            ri += 1
+
+        self._write(ws, rows)
+        time.sleep(1)
+        self._batch([
+            self._freeze_req(sheet_id, 5),
+            self._resize_req(sheet_id, len(self._SUPPLY_HEADERS)),
+        ] + fmt_reqs)
+        logger.info(f"Лист ПОСТАВКИ: {len(recommendations)} SKU")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
