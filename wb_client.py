@@ -136,13 +136,42 @@ class WBClient:
                          "stats", params) or []
 
     def get_orders(self, date_from: str) -> list[dict]:
-        """Заказы: flag=0 → записи по lastChangeDate.
-        Получаем широкое окно (35д), фильтруем по полю date в analytics.
-        Каждая строка = 1 заказ; isCancel=True — отменённые.
+        """Заказы с пагинацией: WB отдаёт max 80k записей за вызов.
+        При достижении лимита используем max(lastChangeDate) как курсор.
+        Дедупликация по srid.
         """
-        params = {"dateFrom": date_from, "flag": 0}
-        return self._get(self.BASE_STATS,
-                         "/api/v1/supplier/orders", "stats", params) or []
+        all_orders: list[dict] = []
+        seen: set[str] = set()
+        current_from = date_from
+
+        while True:
+            batch = self._get(self.BASE_STATS, "/api/v1/supplier/orders",
+                              "stats", {"dateFrom": current_from, "flag": 0}) or []
+            added = 0
+            for o in batch:
+                srid = o.get("srid", "")
+                if srid:
+                    if srid not in seen:
+                        seen.add(srid)
+                        all_orders.append(o)
+                        added += 1
+                else:
+                    all_orders.append(o)
+                    added += 1
+
+            if len(batch) < 80000:
+                break
+
+            last_dates = [o.get("lastChangeDate", "") for o in batch if o.get("lastChangeDate")]
+            if not last_dates:
+                break
+            next_from = max(last_dates)
+            if next_from <= current_from:
+                break
+            logger.info(f"Заказы: {len(all_orders)} записей, следующая страница с {next_from}")
+            current_from = next_from
+
+        return all_orders
 
     # ──────────────────────────────────────────────────────────
     # БЛОК 3 — Платное хранение
