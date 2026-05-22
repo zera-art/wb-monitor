@@ -225,13 +225,13 @@ class SKUMetrics:
         def fmt_days(v): return f"{v:.0f}" if v < 900 else "нет продаж"
 
         if "ПОДНЯТЬ ЦЕНУ" in self.status:
-            result = calc_price_raise(self.turnover_days, self.sales_growth_pct, self.final_price)
+            result = calc_price_raise(self.turnover_days, self.sales_growth_pct, self.price)
             new_price_cell = result["new_price"] if result else ""
         elif "ЦЕНА ПОДНЯТА" in self.status:
             new_price_cell = f"✓ {self.final_price:.0f}"
         elif "МЁРТВЫЙ" in self.status or "ЗАМЕДЛЕННАЯ" in self.status or "КРИТИЧНЫЙ" in self.status:
             has_no_sales = self.sales_7d < 0.5 and self.sales_prev_7d < 0.5
-            dec = calc_price_decrease(self.turnover_days, self.final_price, self.category,
+            dec = calc_price_decrease(self.turnover_days, self.price, self.category,
                                       has_no_sales_14d=has_no_sales)
             if dec:
                 new_price_cell = (f"{dec['new_price']} руб (min)"
@@ -325,7 +325,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
 
     # 2. Мёртвый остаток: есть товар, но нет заказов за 28 дней
     if m.stock > 0 and m.sales_28d < 1:
-        dec = calc_price_decrease(999.0, m.final_price, m.category, has_no_sales_14d=True)
+        dec = calc_price_decrease(999.0, m.price, m.category, has_no_sales_14d=True)
         if dec and dec["is_floor_price"]:
             price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
         elif dec:
@@ -340,7 +340,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
 
     # 3. Критичный остаток: оборачиваемость > 90 дней
     if m.turnover_days > 90:
-        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category)
+        dec = calc_price_decrease(m.turnover_days, m.price, m.category)
         if dec and dec["is_floor_price"]:
             price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"
         elif dec:
@@ -356,7 +356,7 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
     # 4. Замедленная оборачиваемость: 60–90 дней
     if 60 < m.turnover_days <= 90:
         has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
-        dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
+        dec = calc_price_decrease(m.turnover_days, m.price, m.category,
                                   has_no_sales_14d=has_no_sales)
         if dec and dec["is_floor_price"]:
             price_rec = f"Снизить до минимума {dec['new_price']} руб — ниже нельзя"

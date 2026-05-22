@@ -786,12 +786,12 @@ class SheetsWriter:
                 continue
 
             if "ПОДНЯТЬ ЦЕНУ" in m.status:
-                result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.final_price)
+                result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.price)
                 if not result:
                     continue
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
-                    m.final_price, result["new_price"],
+                    m.price, result["new_price"],
                     f"+{result['raise_pct']}%",
                     "Поднять цену", today_str, False, "",
                 ])
@@ -799,7 +799,7 @@ class SheetsWriter:
 
             elif "МЁРТВЫЙ" in m.status or "ЗАМЕДЛЕННАЯ" in m.status:
                 has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
-                dec = calc_price_decrease(m.turnover_days, m.final_price, m.category,
+                dec = calc_price_decrease(m.turnover_days, m.price, m.category,
                                           has_no_sales_14d=has_no_sales)
                 if not dec:
                     continue
@@ -810,10 +810,10 @@ class SheetsWriter:
                 else:
                     new_p_display = f"{dec['new_price']} (финал)"
                     reason = "Снизить цену"
-                step_pct = round((dec['new_price'] / m.final_price - 1) * 100)
+                step_pct = round((dec['new_price'] / m.price - 1) * 100)
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
-                    m.final_price, new_p_display,
+                    m.price, new_p_display,
                     f"{step_pct}%",
                     reason, today_str, False, "",
                 ])
