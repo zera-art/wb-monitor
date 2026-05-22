@@ -28,7 +28,7 @@ from wb_client import WBClient, WBAPIError
 from analytics import build_sku_metrics, build_summary, THRESHOLDS as ANALYTICS_THRESHOLDS
 from sheets_writer import SheetsWriter
 from notifier import TelegramNotifier
-from wb_price_sender import get_approved_changes, send_prices_to_wb
+from wb_price_sender import get_approved_changes, export_prices_to_wb_template
 from supply_analytics import calc_supply_recommendation
 from supply_doc_writer import create_or_update_supply_doc
 
@@ -271,34 +271,19 @@ def run(dry_run: bool = False):
             except Exception as e:
                 logger.error(f"  ✗ Ошибка очереди: {e}")
 
-        # ── Каждый день: отправить одобренные позиции ────
+        # ── Каждый день: экспорт одобренных позиций в Excel-шаблон WB ────
         logger.info("💸 Проверяем одобренные изменения цен...")
         try:
             approved = get_approved_changes(sheets)
             if approved:
-                logger.info(f"  Найдено {len(approved)} одобренных позиций — отправляем на WB")
-                result = send_prices_to_wb(approved, sheets, WB_KEYS["prices_key"])
-                # Записать базу в ЭФФЕКТИВНОСТЬ для каждой отправленной позиции
-                for item in approved:
-                    nm_id = item["nm_id"]
-                    m = metrics.get(nm_id)
-                    if m and item["current_price"] > 0:
-                        action = ("Повышение" if item["new_price"] > item["current_price"]
-                                  else "Снижение")
-                        sheets.record_price_change(
-                            nm_id=nm_id,
-                            name=item["name"],
-                            category=m.category,
-                            action=action,
-                            price_before=item["current_price"],
-                            price_after=item["new_price"],
-                            orders_week=m.avg_weekly_sales,
-                            turnover_days=m.turnover_days,
-                        )
-                if tg and result["total"] > 0:
-                    tg.send_prices_sent(result["n_up"], result["n_down"], result["total"])
+                logger.info(f"  Найдено {len(approved)} одобренных позиций — экспортируем в Excel")
+                result = export_prices_to_wb_template(sheets)
+                if result["total"] > 0:
+                    logger.info(f"  Файл: {result['filename']} ({result['total']} позиций)")
+                    if tg:
+                        tg.send_prices_sent(0, result["total"], result["total"])
             else:
-                logger.info("  Нет позиций для отправки")
+                logger.info("  Нет одобренных позиций для экспорта")
                 # Вторник/среда: напоминание о несогласованных позициях
                 if is_reminder:
                     unapproved = sheets.queue_unapproved_count()
@@ -307,7 +292,7 @@ def run(dry_run: bool = False):
                         if tg:
                             tg.send_price_queue_reminder(unapproved)
         except Exception as e:
-            logger.error(f"  ✗ Ошибка отправки цен: {e}")
+            logger.error(f"  ✗ Ошибка экспорта цен: {e}")
 
         # ── Ежедневно: проверить контрольные точки эффективности ──
         logger.info("📈 Проверяем контрольные точки эффективности...")
