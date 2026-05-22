@@ -803,17 +803,19 @@ class SheetsWriter:
                                           has_no_sales_14d=has_no_sales)
                 if not dec:
                     continue
-                if dec.get("is_wb_limit"):
-                    new_p_display = f"{dec['new_price']} руб (лимит WB)"
-                elif dec["is_floor_price"]:
-                    new_p_display = f"{dec['new_price']} руб (min)"
+                if dec["is_step1"]:
+                    new_p_display = f"{dec['new_price']} (шаг 1 из 2)"
+                    reason = (f"Снизить до {dec['new_price']} сейчас. "
+                              f"Следующий шаг через неделю до {dec['final_price']}")
                 else:
-                    new_p_display = dec["new_price"]
+                    new_p_display = f"{dec['new_price']} (финал)"
+                    reason = "Снизить цену"
+                step_pct = round((dec['new_price'] / m.final_price - 1) * 100)
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
                     m.final_price, new_p_display,
-                    f"-{dec['decrease_pct']}%",
-                    "Снизить цену", today_str, False, "",
+                    f"{step_pct}%",
+                    reason, today_str, False, "",
                 ])
                 n_down += 1
 

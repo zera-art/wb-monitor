@@ -40,10 +40,16 @@ DEFAULT_FLOOR_PRICE = 200
 def calc_price_decrease(turnover_days: float, current_price: float,
                         category: str, has_no_sales_14d: bool = False) -> dict | None:
     """
-    Рассчитывает рекомендованное снижение цены.
-    Новая цена = max(формула, floor по категории, current_price/2).
-    WB не разрешает снижать цену более чем вдвое за один раз.
-    Возвращает {"decrease_pct", "new_price", "is_floor_price", "is_wb_limit"} или None.
+    Рассчитывает рекомендованное снижение цены с поэтапной логикой WB.
+
+    WB запрещает снижать цену более чем вдвое за одно обновление.
+    Если целевая цена < current_price/2 — нужно два шага:
+      Шаг 1 (эта неделя):  current_price / 2
+      Шаг 2 (след. неделя): целевая цена
+
+    Возвращает:
+      {"decrease_pct", "new_price", "final_price",
+       "is_floor_price", "is_step1"} или None.
     """
     if has_no_sales_14d:
         decrease_pct = 30
@@ -58,23 +64,29 @@ def calc_price_decrease(turnover_days: float, current_price: float,
 
     raw_price   = current_price * (1 - decrease_pct / 100)
     floor_price = FLOOR_PRICES.get(category, DEFAULT_FLOOR_PRICE)
-    wb_min      = current_price / 2  # WB: нельзя снижать цену более чем вдвое
+    wb_min      = current_price / 2  # WB: нельзя снижать более чем вдвое
 
-    # Итоговая цена = максимум из трёх ограничений
-    final = raw_price
-    is_floor_price = False
-    is_wb_limit    = False
-    if floor_price > final:
-        final = floor_price
-        is_floor_price = True
-    if wb_min > final:
-        final = wb_min
-        is_floor_price = False
-        is_wb_limit    = True
+    # Целевая цена — ограничена floor, но НЕ лимитом WB (покажем пользователю итог)
+    target = max(raw_price, floor_price)
+    is_floor_price = (target > raw_price)
 
-    new_price = int(round(final / 10) * 10)
-    return {"decrease_pct": decrease_pct, "new_price": new_price,
-            "is_floor_price": is_floor_price, "is_wb_limit": is_wb_limit}
+    if target < wb_min:
+        # Двухэтапное снижение
+        step1 = int(round(wb_min / 10) * 10)
+        final = int(round(target / 10) * 10)
+        return {"decrease_pct": decrease_pct,
+                "new_price":    step1,
+                "final_price":  final,
+                "is_floor_price": is_floor_price,
+                "is_step1":     True}
+    else:
+        # Одноэтапное снижение — достигаем цели сразу
+        final = int(round(target / 10) * 10)
+        return {"decrease_pct": decrease_pct,
+                "new_price":    final,
+                "final_price":  final,
+                "is_floor_price": is_floor_price,
+                "is_step1":     False}
 
 
 def calc_price_raise(turnover_days: float, demand_delta_pct: float,

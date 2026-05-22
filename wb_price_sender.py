@@ -67,7 +67,12 @@ def get_approved_changes(sheets_writer) -> list[dict]:
         except (ValueError, IndexError):
             continue
 
-        raw_new = str(row[Q._Q_NEW]).replace("руб (min)", "").replace("руб", "").strip()
+        raw_new = (str(row[Q._Q_NEW])
+                   .replace("руб (min)", "").replace("руб", "")
+                   .replace("(шаг 1 из 2)", "").replace("(финал)", "")
+                   .replace("(лимит WB)", "")
+                   .strip().split()[0]   # берём только первое слово (число)
+                   if str(row[Q._Q_NEW]).strip() else "")
         try:
             new_price = int(float(raw_new))
         except (ValueError, IndexError):
