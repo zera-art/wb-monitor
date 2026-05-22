@@ -41,9 +41,9 @@ def calc_price_decrease(turnover_days: float, current_price: float,
                         category: str, has_no_sales_14d: bool = False) -> dict | None:
     """
     Рассчитывает рекомендованное снижение цены.
-    Возвращает {"decrease_pct": int, "new_price": int, "is_floor_price": bool} или None.
-    Новая цена округляется вниз до 10 руб.
-    Не снижается ниже floor price по категории.
+    Новая цена = max(формула, floor по категории, current_price/2).
+    WB не разрешает снижать цену более чем вдвое за один раз.
+    Возвращает {"decrease_pct", "new_price", "is_floor_price", "is_wb_limit"} или None.
     """
     if has_no_sales_14d:
         decrease_pct = 30
@@ -56,11 +56,25 @@ def calc_price_decrease(turnover_days: float, current_price: float,
     else:
         return None
 
-    raw_price = current_price * (1 - decrease_pct / 100)
+    raw_price   = current_price * (1 - decrease_pct / 100)
     floor_price = FLOOR_PRICES.get(category, DEFAULT_FLOOR_PRICE)
-    is_floor_price = raw_price < floor_price
-    new_price = int(floor_price if is_floor_price else (raw_price // 10 * 10))
-    return {"decrease_pct": decrease_pct, "new_price": new_price, "is_floor_price": is_floor_price}
+    wb_min      = current_price / 2  # WB: нельзя снижать цену более чем вдвое
+
+    # Итоговая цена = максимум из трёх ограничений
+    final = raw_price
+    is_floor_price = False
+    is_wb_limit    = False
+    if floor_price > final:
+        final = floor_price
+        is_floor_price = True
+    if wb_min > final:
+        final = wb_min
+        is_floor_price = False
+        is_wb_limit    = True
+
+    new_price = int(round(final / 10) * 10)
+    return {"decrease_pct": decrease_pct, "new_price": new_price,
+            "is_floor_price": is_floor_price, "is_wb_limit": is_wb_limit}
 
 
 def calc_price_raise(turnover_days: float, demand_delta_pct: float,

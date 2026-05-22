@@ -803,8 +803,12 @@ class SheetsWriter:
                                           has_no_sales_14d=has_no_sales)
                 if not dec:
                     continue
-                new_p_display = (f"{dec['new_price']} руб (min)"
-                                 if dec["is_floor_price"] else dec["new_price"])
+                if dec.get("is_wb_limit"):
+                    new_p_display = f"{dec['new_price']} руб (лимит WB)"
+                elif dec["is_floor_price"]:
+                    new_p_display = f"{dec['new_price']} руб (min)"
+                else:
+                    new_p_display = dec["new_price"]
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
                     m.final_price, new_p_display,
