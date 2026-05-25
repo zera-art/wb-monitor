@@ -802,6 +802,22 @@ class SheetsWriter:
                 ])
                 n_up += 1
 
+            elif "НУЖНА ПОСТАВКА" in m.status and 0 <= m.turnover_days < 21 and m.price > 0:
+                result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.price)
+                if not result:
+                    continue
+                actual_pct = (result["new_price"] / m.price - 1) * 100
+                if abs(actual_pct) < self._MIN_PRICE_CHANGE_PCT:
+                    continue
+                rows.append([
+                    m.nm_id, m.name[:40], m.category,
+                    m.price, result["new_price"],
+                    f"'+{result['raise_pct']}%",
+                    "Поднять цену (товар заканчивается, замедлить продажи до поставки)",
+                    today_str, False, "",
+                ])
+                n_up += 1
+
             elif "МЁРТВЫЙ" in m.status or "ЗАМЕДЛЕННАЯ" in m.status:
                 has_no_sales = m.sales_7d < 0.5 and m.sales_prev_7d < 0.5
                 dec = calc_price_decrease(m.turnover_days, m.price, m.category,

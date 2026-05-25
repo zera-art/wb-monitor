@@ -238,7 +238,13 @@ class SKUMetrics:
                                   if dec["is_floor_price"] else dec["new_price"])
             else:
                 new_price_cell = ""
-        elif "НУЖНА ПОСТАВКА" in self.status or "НЕТ В НАЛИЧИИ" in self.status:
+        elif "НУЖНА ПОСТАВКА" in self.status:
+            if 0 <= self.turnover_days < 21 and self.final_price > 0:
+                result = calc_price_raise(self.turnover_days, self.sales_growth_pct, self.final_price)
+                new_price_cell = result["new_price"] if result else ""
+            else:
+                new_price_cell = ""
+        elif "НЕТ В НАЛИЧИИ" in self.status:
             new_price_cell = ""
         elif "ВЫВЕДЕН" in self.status:
             new_price_cell = ""
@@ -317,11 +323,16 @@ def _classify(m: SKUMetrics) -> tuple[str, str, int]:
 
     # 1. Нужна поставка: остаток = 0 при наличии заказов, или остаток < продаж за 7 дней
     if (m.stock == 0 and m.sales_28d > 0) or (m.sales_7d > 0 and m.stock < m.sales_7d):
-        return (
-            "🔵 НУЖНА ПОСТАВКА",
-            f"Остаток {m.stock} шт < продажи за 7д ({m.sales_7d:.0f} шт). Срочно пополнить запас.",
-            1
-        )
+        base = f"Остаток {m.stock} шт < продажи за 7д ({m.sales_7d:.0f} шт). Срочно пополнить запас."
+        # Если оборачиваемость <21д — поднять цену, чтобы замедлить продажи до прихода поставки
+        if 0 <= m.turnover_days < 21 and m.final_price > 0:
+            result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.final_price)
+            if result:
+                new_p = result["new_price"]
+                rec = (f"{base} Товар заканчивается. Поднять цену до {new_p} руб "
+                       f"чтобы замедлить продажи до прихода поставки.")
+                return ("🔵 НУЖНА ПОСТАВКА", rec, 1)
+        return ("🔵 НУЖНА ПОСТАВКА", base, 1)
 
     # 2. Мёртвый остаток: есть товар, но нет заказов за 28 дней
     if m.stock > 0 and m.sales_28d < 1:
