@@ -764,6 +764,8 @@ class SheetsWriter:
         "Причина", "Дата добавления", "Согласовано", "Отправлено",
     ]
 
+    _MIN_PRICE_CHANGE_PCT = 5
+
     def update_price_queue(self, sorted_display: list[SKUMetrics]) -> dict:
         """
         Заполняет лист ОЧЕРЕДЬ ИЗМЕНЕНИЙ на понедельник.
@@ -789,10 +791,13 @@ class SheetsWriter:
                 result = calc_price_raise(m.turnover_days, m.sales_growth_pct, m.price)
                 if not result:
                     continue
+                actual_pct = (result["new_price"] / m.price - 1) * 100 if m.price else 0
+                if abs(actual_pct) < self._MIN_PRICE_CHANGE_PCT:
+                    continue
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
                     m.price, result["new_price"],
-                    f"+{result['raise_pct']}%",
+                    f"'+{result['raise_pct']}%",
                     "Поднять цену", today_str, False, "",
                 ])
                 n_up += 1
@@ -803,6 +808,9 @@ class SheetsWriter:
                                           has_no_sales_14d=has_no_sales)
                 if not dec:
                     continue
+                step_pct = round((dec['new_price'] / m.price - 1) * 100)
+                if abs(step_pct) < self._MIN_PRICE_CHANGE_PCT:
+                    continue
                 if dec["is_step1"]:
                     new_p_display = f"{dec['new_price']} (шаг 1 из 2)"
                     reason = (f"Снизить до {dec['new_price']} сейчас. "
@@ -810,11 +818,10 @@ class SheetsWriter:
                 else:
                     new_p_display = f"{dec['new_price']} (финал)"
                     reason = "Снизить цену"
-                step_pct = round((dec['new_price'] / m.price - 1) * 100)
                 rows.append([
                     m.nm_id, m.name[:40], m.category,
                     m.price, new_p_display,
-                    f"{step_pct}%",
+                    f"'{step_pct}%",
                     reason, today_str, False, "",
                 ])
                 n_down += 1
